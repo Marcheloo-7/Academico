@@ -1,4 +1,4 @@
-﻿# ===========================================================================
+# ===========================================================================
 #  setup_core_assets.ps1
 #  Sistema de GestiÃ³n AcadÃ©mica â€” LÃ­nea de Productos de Software
 #  Script Ãºnico de preparaciÃ³n de los 6 Core Assets reutilizables.
@@ -48,10 +48,10 @@ $envContent = @"
 # ============================================
 DB_HOST=localhost
 DB_PORT=5432
-DB_USER=<tu_usuario_postgres>
-DB_PASSWORD=Marcelosql7
+DB_USER=postgres
+DB_PASSWORD=postgres
 DB_NAME=academico_db
-DATABASE_URL=postgresql+psycopg2://postgres:Marcelosql7@localhost:5432/academico_db
+DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/academico_db
 "@
 Set-Content -Path $envFilePath -Value $envContent -Encoding UTF8
 
@@ -107,7 +107,7 @@ Write-Host "===== CA-001: Autenticacion y Autorizacion =====" -ForegroundColor C
 #   (recomendada por la documentaciÃ³n oficial de FastAPI sobre seguridad)
 # - passlib[bcrypt]: hashing seguro de contraseÃ±as con bcrypt
 # - python-multipart: necesario para OAuth2PasswordRequestForm (form-data)
-pip install --quiet fastapi "uvicorn[standard]" "python-jose[cryptography]" "passlib[bcrypt]" python-multipart
+pip install --quiet fastapi "uvicorn[standard]" "python-jose[cryptography]" passlib bcrypt==3.2.0 python-multipart
 
 # Agregar variables de entorno de JWT al archivo .env existente
 $envAuthContent = @"
@@ -164,7 +164,8 @@ function Ask-YesNo {
 if (Ask-YesNo "  Desea incluir el rol Administrador? (s/n)") {
     Add-Content -Path $envFilePath -Value "ROLE_ADMIN=administrador" -Encoding UTF8
     Write-Host "  [OK] Rol 'administrador' agregado al producto" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  [X] Rol 'administrador' omitido" -ForegroundColor DarkGray
 }
 
@@ -172,7 +173,8 @@ if (Ask-YesNo "  Desea incluir el rol Administrador? (s/n)") {
 if (Ask-YesNo "  Desea incluir el rol Docente? (s/n)") {
     Add-Content -Path $envFilePath -Value "ROLE_DOCENTE=docente" -Encoding UTF8
     Write-Host "  [OK] Rol 'docente' agregado al producto" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  [X] Rol 'docente' omitido" -ForegroundColor DarkGray
 }
 
@@ -207,7 +209,8 @@ if (Ask-YesNo "  Desea incluir el modulo Estudiante (CRUD)? (s/n)") {
     New-Item -ItemType Directory -Force -Path $modDir | Out-Null
     New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
     Write-Host "  [OK] Modulo 'Estudiante' incluido -> backend/app/modules/estudiante/" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  [X] Modulo 'Estudiante' omitido" -ForegroundColor DarkGray
 }
 
@@ -217,7 +220,8 @@ if (Ask-YesNo "  Desea incluir el modulo Docente (CRUD)? (s/n)") {
     New-Item -ItemType Directory -Force -Path $modDir | Out-Null
     New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
     Write-Host "  [OK] Modulo 'Docente' incluido -> backend/app/modules/docente/" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  [X] Modulo 'Docente' omitido" -ForegroundColor DarkGray
 }
 
@@ -227,7 +231,8 @@ if (Ask-YesNo "  Desea incluir el modulo Cursos (nombre, docente a cargo, estudi
     New-Item -ItemType Directory -Force -Path $modDir | Out-Null
     New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
     Write-Host "  [OK] Modulo 'Cursos' incluido -> backend/app/modules/cursos/" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  [X] Modulo 'Cursos' omitido" -ForegroundColor DarkGray
 }
 
@@ -237,7 +242,8 @@ if (Ask-YesNo "  Desea incluir el modulo Inscripciones (con validaciones de cupo
     New-Item -ItemType Directory -Force -Path $modDir | Out-Null
     New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
     Write-Host "  [OK] Modulo 'Inscripciones' incluido -> backend/app/modules/inscripciones/" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  [X] Modulo 'Inscripciones' omitido" -ForegroundColor DarkGray
 }
 
@@ -265,7 +271,7 @@ pip install --quiet "strawberry-graphql[fastapi]"
 # - graphql: implementaciÃ³n de referencia de GraphQL para JavaScript,
 #   requerida como peer dependency de @apollo/client.
 Push-Location $FRONTEND_DIR
-npm install --save @apollo/client graphql
+npm install --save @apollo/client@3 graphql
 Pop-Location
 
 Write-Host "  [OK] Strawberry GraphQL (backend) y Apollo Client (frontend) instalados" -ForegroundColor Green
@@ -307,15 +313,16 @@ function New-ProjectSkeleton {
     Write-Host "  Generando estructura de carpetas y codigo base del proyecto"  -ForegroundColor Cyan
     Write-Host "==============================================================" -ForegroundColor Cyan
 
-    $createdFiles  = [System.Collections.ArrayList]::new()
-    $skippedFiles  = [System.Collections.ArrayList]::new()
+    $createdFiles = [System.Collections.ArrayList]::new()
+    $skippedFiles = [System.Collections.ArrayList]::new()
 
     function Write-SkeletonFile {
         param([string]$FilePath, [string]$Content)
         if (Test-Path $FilePath) {
             [void]$skippedFiles.Add($FilePath)
             Write-Host "  [OMITIDO] Ya existe: $FilePath" -ForegroundColor Yellow
-        } else {
+        }
+        else {
             $parentDir = Split-Path -Parent $FilePath
             if (-not (Test-Path $parentDir)) {
                 New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
@@ -329,7 +336,7 @@ function New-ProjectSkeleton {
     Write-Host ""
     Write-Host "--- Instalando dependencias adicionales del frontend ---" -ForegroundColor Cyan
     Push-Location $FRONTEND_DIR
-    npm install react-router-dom @apollo/client graphql
+    npm install react-router-dom @apollo/client@3 graphql
     Pop-Location
 
     Write-Host ""
@@ -380,7 +387,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:Marcelosql7@localhost:5432/academico_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/academico_db")
 engine = create_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -838,6 +845,8 @@ from core.ca002_usuarios.router import router as usuarios_router
 from core.ca006_graphql.schema import schema
 from core.ca005_db.database import engine, Base, SessionLocal
 
+app = FastAPI(title="Sistema de Gestion Academica - LPS", version="0.1.0")
+
 @app.on_event("startup")
 def startup_event():
     Base.metadata.create_all(bind=engine)
@@ -858,12 +867,19 @@ def startup_event():
     finally:
         db.close()
 
-async def get_context(db: Session = next(SessionLocal()), request: Request = None):
+from fastapi import Depends
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+async def get_context(db: Session = Depends(get_db), request: Request = None):
     return {"db": db, "request": request}
 
 graphql_app = GraphQLRouter(schema, context_getter=get_context)
-
-app = FastAPI(title="Sistema de Gestion Academica - LPS", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1134,13 +1150,13 @@ export default function App() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\App.jsx") -Content $content_fe_app
 
     # --- Frontend: Docentes, Cursos, Inscripciones ---
-    $content_fe_docentes = @"
+    $content_fe_docentes = @'
 import { useQuery, gql } from "@apollo/client";
 import { Typography, List, ListItem, ListItemText, CircularProgress } from "@mui/material";
 
-const GET_DOCENTES = gql``
+const GET_DOCENTES = gql`
   query { docentes { id nombre correo especialidad } }
-``;
+`;
 
 export default function DocentesPage() {
   const { data, loading, error } = useQuery(GET_DOCENTES);
@@ -1158,16 +1174,16 @@ export default function DocentesPage() {
     </div>
   );
 }
-"@
+'@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\docentes\DocentesPage.jsx") -Content $content_fe_docentes
 
-    $content_fe_cursos = @"
+    $content_fe_cursos = @'
 import { useQuery, gql } from "@apollo/client";
 import { Typography, List, ListItem, ListItemText, CircularProgress } from "@mui/material";
 
-const GET_CURSOS = gql``
+const GET_CURSOS = gql`
   query { cursos { id nombre periodo_academico } }
-``;
+`;
 
 export default function CursosPage() {
   const { data, loading, error } = useQuery(GET_CURSOS);
@@ -1185,16 +1201,16 @@ export default function CursosPage() {
     </div>
   );
 }
-"@
+'@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\cursos\CursosPage.jsx") -Content $content_fe_cursos
 
-    $content_fe_insc = @"
+    $content_fe_insc = @'
 import { useQuery, gql } from "@apollo/client";
 import { Typography, List, ListItem, ListItemText, CircularProgress } from "@mui/material";
 
-const GET_INSC = gql``
+const GET_INSC = gql`
   query { inscripciones { id estado } }
-``;
+`;
 
 export default function InscripcionesPage() {
   const { data, loading, error } = useQuery(GET_INSC);
@@ -1212,7 +1228,7 @@ export default function InscripcionesPage() {
     </div>
   );
 }
-"@
+'@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inscripciones\InscripcionesPage.jsx") -Content $content_fe_insc
 
     # Resumen
