@@ -231,6 +231,74 @@ Pop-Location
 
 Write-Host "  [OK] Strawberry GraphQL (backend) y Apollo Client (frontend) instalados" -ForegroundColor Green
 
+
+# ===========================================================================
+# CA-007 - Validaciones Comunes
+# Funciones de validacion compartidas entre frontend y backend.
+# No requiere paquetes adicionales (usa re/stdlib en Python y JS puro).
+# ===========================================================================
+
+Write-Host "===== CA-007: Validaciones Comunes =====" -ForegroundColor Cyan
+Write-Host "  [OK] No se requieren paquetes adicionales" -ForegroundColor Green
+
+
+# ===========================================================================
+# CA-008 - Manejo Centralizado de Errores
+# Exception handlers de FastAPI, logging y formateo de errores GraphQL.
+# No requiere paquetes adicionales (usa logging/stdlib y Strawberry ya instalado).
+# ===========================================================================
+
+Write-Host "===== CA-008: Manejo Centralizado de Errores =====" -ForegroundColor Cyan
+Write-Host "  [OK] No se requieren paquetes adicionales" -ForegroundColor Green
+
+
+# ===========================================================================
+# CA-009 - Registro de Auditoria
+# Modelo AuditLog y endpoint de consulta de historial.
+# No requiere paquetes adicionales (usa SQLAlchemy ya instalado).
+# ===========================================================================
+
+Write-Host "===== CA-009: Registro de Auditoria =====" -ForegroundColor Cyan
+Write-Host "  [OK] No se requieren paquetes adicionales" -ForegroundColor Green
+
+
+# ===========================================================================
+# CA-010 - Configuracion del Entorno
+# Modulo de Settings tipado (pydantic-settings) y variables de CORS/entorno.
+# ===========================================================================
+
+Write-Host "===== CA-010: Configuracion del Entorno =====" -ForegroundColor Cyan
+
+pip install --quiet pydantic-settings
+
+$envConfigContent = @"
+
+# ============================================
+# CA-010 - Configuracion del Entorno
+# ============================================
+CORS_ORIGINS=http://localhost:5173
+ENVIRONMENT=development
+LOG_LEVEL=INFO
+"@
+Add-Content -Path $envFilePath -Value $envConfigContent -Encoding UTF8
+
+Write-Host "  [OK] pydantic-settings instalado y variables de entorno anadidas al .env" -ForegroundColor Green
+
+
+# ===========================================================================
+# CA-011 - DevOps Templates
+# Dockerfiles, docker-compose, workflows de CI/CD y linting del frontend.
+# ===========================================================================
+
+Write-Host "===== CA-011: DevOps Templates =====" -ForegroundColor Cyan
+
+Push-Location $FRONTEND_DIR
+npm install --save-dev "eslint@^9" "@eslint/js@^9" eslint-plugin-react eslint-plugin-react-hooks globals
+npm pkg set scripts.lint="eslint ."
+Pop-Location
+
+Write-Host "  [OK] ESLint instalado y script 'lint' anadido al frontend" -ForegroundColor Green
+
 # -------------------------------------------------------------------
 # Comandos de arranque de servidores de desarrollo
 # Ejecutar cada uno en una terminal separada una vez que todos los
@@ -303,13 +371,20 @@ function New-ProjectSkeleton {
         (Join-Path $BACKEND_DIR "core\ca003_roles"),
         (Join-Path $BACKEND_DIR "core\ca005_db"),
         (Join-Path $BACKEND_DIR "core\ca006_graphql"),
+        (Join-Path $BACKEND_DIR "core\ca007_validaciones"),
+        (Join-Path $BACKEND_DIR "core\ca008_errores"),
+        (Join-Path $BACKEND_DIR "core\ca009_auditoria"),
+        (Join-Path $BACKEND_DIR "core\ca010_config"),
         (Join-Path $FRONTEND_DIR "src\design-system\components"),
         (Join-Path $FRONTEND_DIR "src\modules\estudiantes"),
         (Join-Path $FRONTEND_DIR "src\modules\docentes"),
         (Join-Path $FRONTEND_DIR "src\modules\cursos"),
         (Join-Path $FRONTEND_DIR "src\modules\inscripciones"),
         (Join-Path $FRONTEND_DIR "src\auth"),
-        (Join-Path $FRONTEND_DIR "src\graphql")
+        (Join-Path $FRONTEND_DIR "src\graphql"),
+        (Join-Path $FRONTEND_DIR "src\utils"),
+        (Join-Path $FRONTEND_DIR "src\errors"),
+        (Join-Path $PROJECT_ROOT ".github\workflows")
     )
 
     foreach ($dir in $directories) {
@@ -326,7 +401,11 @@ function New-ProjectSkeleton {
         (Join-Path $BACKEND_DIR "core\ca002_usuarios\__init__.py"),
         (Join-Path $BACKEND_DIR "core\ca003_roles\__init__.py"),
         (Join-Path $BACKEND_DIR "core\ca005_db\__init__.py"),
-        (Join-Path $BACKEND_DIR "core\ca006_graphql\__init__.py")
+        (Join-Path $BACKEND_DIR "core\ca006_graphql\__init__.py"),
+        (Join-Path $BACKEND_DIR "core\ca007_validaciones\__init__.py"),
+        (Join-Path $BACKEND_DIR "core\ca008_errores\__init__.py"),
+        (Join-Path $BACKEND_DIR "core\ca009_auditoria\__init__.py"),
+        (Join-Path $BACKEND_DIR "core\ca010_config\__init__.py")
     )
     foreach ($p in $initPaths) {
         Write-SkeletonFile -FilePath $p -Content $initContent
@@ -600,6 +679,7 @@ from typing import List
 from . import schemas, services
 from core.ca005_db.session import get_db
 from core.ca003_roles.dependencies import requiere_rol
+from core.ca009_auditoria.services import registrar_auditoria
 
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
 
@@ -609,7 +689,9 @@ def listar_usuarios(db: Session = Depends(get_db), token = Depends(requiere_rol(
 
 @router.post("/", response_model=schemas.UsuarioResponse)
 def crear_usuario(datos: schemas.UsuarioCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
-    return services.crear_usuario(db, datos)
+    nuevo = services.crear_usuario(db, datos)
+    registrar_auditoria(db, usuario=token.sub, recurso="usuario", accion="crear", valores_nuevos={"correo": nuevo.correo, "rol": nuevo.rol})
+    return nuevo
 
 @router.get("/estudiantes", response_model=List[schemas.EstudianteResponse])
 def listar_estudiantes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
@@ -617,7 +699,9 @@ def listar_estudiantes(filtro: str = None, db: Session = Depends(get_db), token 
 
 @router.post("/estudiantes", response_model=schemas.EstudianteResponse)
 def crear_estudiante(datos: schemas.EstudianteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
-    return services.crear_estudiante(db, datos)
+    nuevo = services.crear_estudiante(db, datos)
+    registrar_auditoria(db, usuario=token.sub, recurso="estudiante", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "codigo": nuevo.codigo})
+    return nuevo
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\router.py") -Content $content_usr_router
 
@@ -730,6 +814,7 @@ import strawberry
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types import Info
 from typing import Optional, List
+from core.ca008_errores.graphql_errors import AcademicoSchema
 from .types import (
     UsuarioType, DocenteType, EstudianteType,
     CursoType, InscripcionType, AuthPayload,
@@ -787,9 +872,739 @@ class Mutation:
         db.refresh(nuevo)
         return nuevo
 
-schema = strawberry.Schema(query=Query, mutation=Mutation, config=StrawberryConfig(auto_camel_case=False))
+schema = AcademicoSchema(query=Query, mutation=Mutation, config=StrawberryConfig(auto_camel_case=False))
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\schema.py") -Content $content_gql_schema
+
+    # CA-007 - Validaciones Comunes
+    Write-Host ""
+    Write-Host "--- CA-007: Validaciones Comunes ---" -ForegroundColor Cyan
+    $content_val_mensajes = @'
+MENSAJES_ERROR = {
+    "campo_requerido": "Este campo es obligatorio.",
+    "formato_email_invalido": "El formato del correo electronico no es valido.",
+    "longitud_invalida": "La longitud del campo no cumple con el rango permitido.",
+    "fecha_invalida": "La fecha ingresada no es valida.",
+    "cedula_invalida": "El numero de cedula/matricula no es valido.",
+    "password_debil": "La contrasena debe tener al menos 8 caracteres, una mayuscula, una minuscula y un numero.",
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca007_validaciones\mensajes.py") -Content $content_val_mensajes
+
+    $content_val_validators = @'
+import re
+from datetime import datetime
+from typing import Optional
+
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def es_email_valido(valor: str) -> bool:
+    return bool(valor) and bool(EMAIL_REGEX.match(valor))
+
+
+def validar_longitud(valor: str, minimo: int = 0, maximo: Optional[int] = None) -> bool:
+    if valor is None:
+        return False
+    largo = len(valor)
+    if largo < minimo:
+        return False
+    if maximo is not None and largo > maximo:
+        return False
+    return True
+
+
+def es_fecha_valida(valor: str, formato: str = "%Y-%m-%d") -> bool:
+    try:
+        datetime.strptime(valor, formato)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def es_cedula_valida(valor: str) -> bool:
+    # Validacion basica: solo digitos y longitud entre 6 y 15.
+    # Un checksum real de cedula es especifico de cada pais/producto
+    # y queda fuera del alcance de este Core Asset generico.
+    return bool(valor) and valor.isdigit() and 6 <= len(valor) <= 15
+
+
+def es_password_seguro(valor: str) -> bool:
+    if not valor or len(valor) < 8:
+        return False
+    tiene_mayuscula = any(c.isupper() for c in valor)
+    tiene_minuscula = any(c.islower() for c in valor)
+    tiene_digito = any(c.isdigit() for c in valor)
+    return tiene_mayuscula and tiene_minuscula and tiene_digito
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca007_validaciones\validators.py") -Content $content_val_validators
+
+    $content_val_mixins = @'
+from .validators import es_email_valido
+from .mensajes import MENSAJES_ERROR
+
+
+def validar_correo_pydantic(cls, v: str) -> str:
+    if not es_email_valido(v):
+        raise ValueError(MENSAJES_ERROR["formato_email_invalido"])
+    return v
+
+
+# Ejemplo de uso en un schema Pydantic v2 (no aplicado automaticamente a los
+# schemas existentes, disponible para que cada producto derivado lo adopte):
+#
+# from pydantic import BaseModel, field_validator
+# from core.ca007_validaciones.mixins import validar_correo_pydantic
+#
+# class MiSchema(BaseModel):
+#     correo: str
+#     _check_correo = field_validator("correo")(validar_correo_pydantic)
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca007_validaciones\mixins.py") -Content $content_val_mixins
+
+    $content_fe_validation = @'
+export const ERROR_MESSAGES = {
+  campoRequerido: "Este campo es obligatorio.",
+  formatoEmailInvalido: "El formato del correo electronico no es valido.",
+  longitudInvalida: "La longitud del campo no cumple con el rango permitido.",
+  fechaInvalida: "La fecha ingresada no es valida.",
+  cedulaInvalida: "El numero de cedula/matricula no es valido.",
+  passwordDebil:
+    "La contrasena debe tener al menos 8 caracteres, una mayuscula, una minuscula y un numero.",
+};
+
+const EMAIL_REGEX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+export function validateEmail(value) {
+  return Boolean(value) && EMAIL_REGEX.test(value);
+}
+
+export function validateRequired(value) {
+  return value !== null && value !== undefined && String(value).trim() !== "";
+}
+
+export function validateLength(value, min = 0, max = Infinity) {
+  if (value === null || value === undefined) return false;
+  const len = String(value).length;
+  return len >= min && len <= max;
+}
+
+export function validateDateRange(value, min, max) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  if (min && date < new Date(min)) return false;
+  if (max && date > new Date(max)) return false;
+  return true;
+}
+
+export function validateCedula(value) {
+  return Boolean(value) && /^\d{6,15}$/.test(value);
+}
+
+export function validatePasswordStrength(value) {
+  if (!value || value.length < 8) return false;
+  return /[A-Z]/.test(value) && /[a-z]/.test(value) && /\d/.test(value);
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\utils\validation.js") -Content $content_fe_validation
+
+    $content_fe_useformvalidation = @'
+import { useState } from "react";
+
+// rules: { [campo]: (valor) => mensajeDeError | null }
+export function useFormValidation(initialValues, rules) {
+  const [values, setValues] = useState(initialValues);
+  const [errors, setErrors] = useState({});
+
+  const handleChange = (campo) => (e) => {
+    setValues((prev) => ({ ...prev, [campo]: e.target.value }));
+  };
+
+  const validateAll = () => {
+    const nuevosErrores = {};
+    Object.keys(rules).forEach((campo) => {
+      const mensaje = rules[campo](values[campo]);
+      if (mensaje) nuevosErrores[campo] = mensaje;
+    });
+    setErrors(nuevosErrores);
+    return Object.keys(nuevosErrores).length === 0;
+  };
+
+  return { values, errors, handleChange, validateAll };
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\utils\useFormValidation.js") -Content $content_fe_useformvalidation
+
+    # CA-008 - Manejo Centralizado de Errores
+    Write-Host ""
+    Write-Host "--- CA-008: Manejo Centralizado de Errores ---" -ForegroundColor Cyan
+    $content_err_schemas = @'
+from typing import Any, Optional
+from pydantic import BaseModel
+
+
+class ErrorResponse(BaseModel):
+    codigo: str
+    mensaje: str
+    tipo: str
+    detalle: Optional[Any] = None
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca008_errores\schemas.py") -Content $content_err_schemas
+
+    $content_err_exceptions = @'
+class AppException(Exception):
+    def __init__(self, codigo: str, mensaje: str, status_code: int = 400, tipo: str = "aplicacion"):
+        self.codigo = codigo
+        self.mensaje = mensaje
+        self.status_code = status_code
+        self.tipo = tipo
+        super().__init__(mensaje)
+
+
+class RecursoNoEncontradoException(AppException):
+    def __init__(self, mensaje: str = "Recurso no encontrado"):
+        super().__init__(codigo="recurso_no_encontrado", mensaje=mensaje, status_code=404, tipo="no_encontrado")
+
+
+class NoAutorizadoException(AppException):
+    def __init__(self, mensaje: str = "No autorizado"):
+        super().__init__(codigo="no_autorizado", mensaje=mensaje, status_code=401, tipo="autenticacion")
+
+
+class PermisoDenegadoException(AppException):
+    def __init__(self, mensaje: str = "Permiso denegado"):
+        super().__init__(codigo="permiso_denegado", mensaje=mensaje, status_code=403, tipo="autorizacion")
+
+
+class ErrorDeValidacionException(AppException):
+    def __init__(self, mensaje: str = "Error de validacion"):
+        super().__init__(codigo="error_validacion", mensaje=mensaje, status_code=422, tipo="validacion")
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca008_errores\exceptions.py") -Content $content_err_exceptions
+
+    $content_err_logging = @'
+import logging
+
+logger = logging.getLogger("academico")
+
+
+def configurar_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca008_errores\logging_config.py") -Content $content_err_logging
+
+    $content_err_handlers = @'
+from fastapi import Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .exceptions import AppException
+from .schemas import ErrorResponse
+from .logging_config import logger
+
+
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.warning("Error de validacion en %s: %s", request.url.path, exc.errors())
+    error = ErrorResponse(
+        codigo="error_validacion",
+        mensaje="Los datos enviados no son validos.",
+        tipo="validacion",
+        detalle=exc.errors(),
+    )
+    return JSONResponse(status_code=422, content=error.model_dump())
+
+
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    logger.warning("HTTPException en %s: %s", request.url.path, exc.detail)
+    error = ErrorResponse(
+        codigo="error_http",
+        mensaje=str(exc.detail),
+        tipo="cliente" if exc.status_code < 500 else "servidor",
+    )
+    return JSONResponse(status_code=exc.status_code, content=error.model_dump())
+
+
+async def app_exception_handler(request: Request, exc: AppException):
+    logger.warning("AppException en %s: %s", request.url.path, exc.mensaje)
+    error = ErrorResponse(codigo=exc.codigo, mensaje=exc.mensaje, tipo=exc.tipo)
+    return JSONResponse(status_code=exc.status_code, content=error.model_dump())
+
+
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.error("Error no controlado en %s: %s", request.url.path, exc, exc_info=True)
+    error = ErrorResponse(
+        codigo="error_servidor",
+        mensaje="Ocurrio un error inesperado en el servidor.",
+        tipo="servidor",
+    )
+    return JSONResponse(status_code=500, content=error.model_dump())
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca008_errores\handlers.py") -Content $content_err_handlers
+
+    $content_err_graphql = @'
+import strawberry
+
+from .logging_config import logger
+
+
+class AcademicoSchema(strawberry.Schema):
+    def process_errors(self, errors, execution_context=None):
+        for error in errors:
+            logger.error("Error GraphQL: %s", error)
+        super().process_errors(errors, execution_context)
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca008_errores\graphql_errors.py") -Content $content_err_graphql
+
+    $content_fe_errorsnackbar = @'
+import { Snackbar, Alert } from "@mui/material";
+
+export default function ErrorSnackbar({ open, message, onClose, severity = "error" }) {
+  return (
+    <Snackbar open={open} autoHideDuration={5000} onClose={onClose} anchorOrigin={{ vertical: "top", horizontal: "center" }}>
+      <Alert onClose={onClose} severity={severity} variant="filled" sx={{ width: "100%" }}>
+        {message}
+      </Alert>
+    </Snackbar>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\errors\ErrorSnackbar.jsx") -Content $content_fe_errorsnackbar
+
+    $content_fe_useerrorhandler = @'
+import { useState } from "react";
+
+export function useErrorHandler() {
+  const [error, setError] = useState("");
+
+  const showError = (message) => setError(message);
+  const clearError = () => setError("");
+
+  return { error, showError, clearError };
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\errors\useErrorHandler.js") -Content $content_fe_useerrorhandler
+
+    # CA-009 - Registro de Auditoria
+    Write-Host ""
+    Write-Host "--- CA-009: Registro de Auditoria ---" -ForegroundColor Cyan
+    $content_audit_models = @'
+from datetime import datetime
+from sqlalchemy import Column, Integer, String, DateTime, JSON
+from core.ca005_db.database import Base
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_correo = Column(String, nullable=False)
+    recurso = Column(String, nullable=False)
+    accion = Column(String, nullable=False)
+    valores_anteriores = Column(JSON, nullable=True)
+    valores_nuevos = Column(JSON, nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca009_auditoria\models.py") -Content $content_audit_models
+
+    $content_audit_schemas = @'
+from datetime import datetime
+from typing import Any, Optional
+from pydantic import BaseModel
+
+
+class AuditLogResponse(BaseModel):
+    id: int
+    usuario_correo: str
+    recurso: str
+    accion: str
+    valores_anteriores: Optional[Any] = None
+    valores_nuevos: Optional[Any] = None
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca009_auditoria\schemas.py") -Content $content_audit_schemas
+
+    $content_audit_services = @'
+from typing import Any, Optional
+from sqlalchemy.orm import Session
+from .models import AuditLog
+
+
+def registrar_auditoria(
+    db: Session,
+    usuario: str,
+    recurso: str,
+    accion: str,
+    valores_anteriores: Optional[Any] = None,
+    valores_nuevos: Optional[Any] = None,
+) -> AuditLog:
+    entrada = AuditLog(
+        usuario_correo=usuario,
+        recurso=recurso,
+        accion=accion,
+        valores_anteriores=valores_anteriores,
+        valores_nuevos=valores_nuevos,
+    )
+    db.add(entrada)
+    db.commit()
+    db.refresh(entrada)
+    return entrada
+
+
+def listar_auditoria(
+    db: Session,
+    recurso: Optional[str] = None,
+    usuario_correo: Optional[str] = None,
+    limite: int = 50,
+) -> list[AuditLog]:
+    query = db.query(AuditLog)
+    if recurso:
+        query = query.filter(AuditLog.recurso == recurso)
+    if usuario_correo:
+        query = query.filter(AuditLog.usuario_correo == usuario_correo)
+    return query.order_by(AuditLog.timestamp.desc()).limit(limite).all()
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca009_auditoria\services.py") -Content $content_audit_services
+
+    $content_audit_router = @'
+from typing import List, Optional
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from . import schemas, services
+from core.ca005_db.session import get_db
+from core.ca003_roles.dependencies import requiere_rol
+
+router = APIRouter(prefix="/auditoria", tags=["Auditoria"])
+
+
+@router.get("/", response_model=List[schemas.AuditLogResponse])
+def listar_auditoria(
+    recurso: Optional[str] = None,
+    usuario_correo: Optional[str] = None,
+    limite: int = 50,
+    db: Session = Depends(get_db),
+    token=Depends(requiere_rol("administrador")),
+):
+    return services.listar_auditoria(db, recurso, usuario_correo, limite)
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca009_auditoria\router.py") -Content $content_audit_router
+
+    # CA-010 - Configuracion del Entorno
+    Write-Host ""
+    Write-Host "--- CA-010: Configuracion del Entorno ---" -ForegroundColor Cyan
+    $content_settings = @'
+# Modulo centralizado de configuracion (CA-010). El resto del proyecto
+# (ca001_auth/security.py, ca005_db/database.py) sigue usando os.getenv()
+# + load_dotenv() directamente; no se migro ese codigo existente a este
+# modulo para no forzar un refactor fuera del alcance de este Core Asset.
+# El codigo nuevo debe preferir "settings" en vez de os.getenv() suelto.
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    database_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/academico_db"
+    jwt_secret_key: str = "super_secret_key_123"
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 30
+    cors_origins: str = "http://localhost:5173"
+    environment: str = "development"
+    log_level: str = "INFO"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origen.strip() for origen in self.cors_origins.split(",") if origen.strip()]
+
+
+settings = Settings()
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca010_config\settings.py") -Content $content_settings
+
+    $content_env_dev_example = @'
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=academico_db
+DB_USER=postgres
+DB_PASSWORD=postgres
+DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/academico_db
+
+JWT_SECRET_KEY=<genera_una_clave_secreta_aleatoria>
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+ROLE_ADMIN=administrador
+ROLE_DOCENTE=docente
+
+CORS_ORIGINS=http://localhost:5173
+ENVIRONMENT=development
+LOG_LEVEL=DEBUG
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR ".env.development.example") -Content $content_env_dev_example
+
+    $content_env_prod_example = @'
+DB_HOST=<host_de_produccion>
+DB_PORT=5432
+DB_NAME=academico_db
+DB_USER=<usuario_produccion>
+DB_PASSWORD=<password_produccion>
+DATABASE_URL=postgresql+psycopg2://<usuario_produccion>:<password_produccion>@<host_de_produccion>:5432/academico_db
+
+JWT_SECRET_KEY=<genera_una_clave_secreta_aleatoria_larga>
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+ROLE_ADMIN=administrador
+ROLE_DOCENTE=docente
+
+CORS_ORIGINS=<https://tu-dominio>
+ENVIRONMENT=production
+LOG_LEVEL=WARNING
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR ".env.production.example") -Content $content_env_prod_example
+
+    $content_fe_env_example = @'
+VITE_API_URL=http://localhost:8000
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR ".env.example") -Content $content_fe_env_example
+
+    # CA-011 - DevOps Templates
+    Write-Host ""
+    Write-Host "--- CA-011: DevOps Templates ---" -ForegroundColor Cyan
+    $content_requirements = @'
+fastapi
+uvicorn[standard]
+python-jose[cryptography]
+passlib
+bcrypt==3.2.0
+python-multipart
+sqlalchemy
+psycopg2-binary
+asyncpg
+python-dotenv
+email-validator
+strawberry-graphql[fastapi]
+pydantic-settings
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "requirements.txt") -Content $content_requirements
+
+    $content_backend_dockerfile = @'
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "Dockerfile") -Content $content_backend_dockerfile
+
+    $content_frontend_dockerfile = @'
+FROM node:20-alpine AS build
+WORKDIR /app
+ARG VITE_API_URL=http://localhost:8000
+ENV VITE_API_URL=$VITE_API_URL
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "Dockerfile") -Content $content_frontend_dockerfile
+
+    $content_nginx_conf = @'
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri /index.html;
+    }
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "nginx.conf") -Content $content_nginx_conf
+
+    $content_docker_compose = @'
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: academico_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/academico_db
+      JWT_SECRET_KEY: cambia_esta_clave_en_produccion
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+      CORS_ORIGINS: http://localhost:5174
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+    ports:
+      - "8001:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8001
+    depends_on:
+      - backend
+    ports:
+      - "5174:80"
+
+volumes:
+  db_data:
+'@
+    Write-SkeletonFile -FilePath (Join-Path $PROJECT_ROOT "docker-compose.yml") -Content $content_docker_compose
+
+    $content_ci_workflow = @'
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      # No hay suite de tests todavia; compileall sirve como chequeo minimo
+      # de que todos los modulos importan sin errores de sintaxis.
+      - run: python -m compileall .
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install
+      - run: npm run lint
+      - run: npm run build
+'@
+    Write-SkeletonFile -FilePath (Join-Path $PROJECT_ROOT ".github\workflows\ci.yml") -Content $content_ci_workflow
+
+    $content_cd_workflow = @'
+# Plantilla de despliegue continuo. NO es funcional tal cual: requiere
+# configurar los secrets del repositorio (registro de contenedores,
+# credenciales del servidor/orquestador destino) antes de poder desplegar
+# a un ambiente real. Se deja como punto de partida para que cada producto
+# derivado la complete segun su infraestructura (Docker Hub, GHCR, K8s, etc.).
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t academico-backend:${{ github.sha }} ./backend
+
+      - name: Build frontend image
+        run: docker build -t academico-frontend:${{ github.sha }} ./frontend
+
+      # - name: Login al registro de contenedores
+      #   run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login <registry> -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+      # - name: Push de imagenes
+      #   run: |
+      #     docker push <registry>/academico-backend:${{ github.sha }}
+      #     docker push <registry>/academico-frontend:${{ github.sha }}
+      # - name: Deploy a staging/produccion
+      #   run: echo "Agregar aqui el paso de despliegue especifico del ambiente destino"
+'@
+    Write-SkeletonFile -FilePath (Join-Path $PROJECT_ROOT ".github\workflows\cd.yml") -Content $content_cd_workflow
+
+    $content_eslint_config = @'
+import js from "@eslint/js";
+import react from "eslint-plugin-react";
+import reactHooks from "eslint-plugin-react-hooks";
+import globals from "globals";
+
+export default [
+  { ignores: ["dist"] },
+  js.configs.recommended,
+  {
+    files: ["**/*.{js,jsx}"],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+      parserOptions: {
+        ecmaFeatures: { jsx: true },
+        sourceType: "module",
+      },
+    },
+    plugins: {
+      react,
+      "react-hooks": reactHooks,
+    },
+    rules: {
+      ...react.configs.recommended.rules,
+      ...reactHooks.configs.recommended.rules,
+      "react/react-in-jsx-scope": "off",
+      "react/prop-types": "off",
+      // Restaurar sesion desde localStorage al montar es un patron valido
+      // y comun para bootstrap de auth; se baja a warning en vez de error.
+      "react-hooks/set-state-in-effect": "warn",
+    },
+    settings: { react: { version: "detect" } },
+  },
+];
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "eslint.config.js") -Content $content_eslint_config
 
     # main.py y env
     Write-Host ""
@@ -797,15 +1612,34 @@ schema = strawberry.Schema(query=Query, mutation=Mutation, config=StrawberryConf
     $content_main = @'
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from strawberry.fastapi import GraphQLRouter
 from sqlalchemy.orm import Session
 
 from core.ca001_auth.router import router as auth_router
 from core.ca002_usuarios.router import router as usuarios_router
+from core.ca009_auditoria.router import router as auditoria_router
 from core.ca006_graphql.schema import schema
 from core.ca005_db.database import engine, Base, SessionLocal
+from core.ca008_errores.handlers import (
+    validation_exception_handler,
+    http_exception_handler,
+    app_exception_handler,
+    generic_exception_handler,
+)
+from core.ca008_errores.exceptions import AppException
+from core.ca008_errores.logging_config import configurar_logging
+from core.ca010_config.settings import settings
+
+configurar_logging()
 
 app = FastAPI(title="Sistema de Gestion Academica - LPS", version="0.1.0")
+
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(Exception, generic_exception_handler)
 
 @app.on_event("startup")
 def startup_event():
@@ -813,6 +1647,7 @@ def startup_event():
     db = SessionLocal()
     try:
         from core.ca005_db.models import Usuario
+        from core.ca009_auditoria.models import AuditLog
         from core.ca001_auth.security import get_password_hash
         if not db.query(Usuario).filter(Usuario.correo == "admin@academico.com").first():
             admin = Usuario(
@@ -843,7 +1678,7 @@ graphql_app = GraphQLRouter(schema, context_getter=get_context)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -851,6 +1686,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(usuarios_router)
+app.include_router(auditoria_router)
 app.include_router(graphql_app, prefix="/graphql")
 
 @app.get("/")
@@ -864,8 +1700,19 @@ DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=academico_db
 DB_USER=postgres
-DB_PASSWORD=Marcelosql7
-SECRET_KEY=super_secret_key_123_change_me_in_prod
+DB_PASSWORD=<tu_password>
+DATABASE_URL=postgresql+psycopg2://postgres:<tu_password>@localhost:5432/academico_db
+
+JWT_SECRET_KEY=<genera_una_clave_secreta_aleatoria>
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+ROLE_ADMIN=administrador
+ROLE_DOCENTE=docente
+
+CORS_ORIGINS=http://localhost:5173
+ENVIRONMENT=development
+LOG_LEVEL=INFO
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR ".env.example") -Content $content_env_example
 
@@ -878,7 +1725,8 @@ SECRET_KEY=super_secret_key_123_change_me_in_prod
 import { ApolloClient, InMemoryCache, createHttpLink } from "@apollo/client";
 import { setContext } from "@apollo/client/link/context";
 
-const httpLink = createHttpLink({ uri: "http://localhost:8000/graphql" });
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const httpLink = createHttpLink({ uri: `${API_URL}/graphql` });
 const authLink = setContext((_, { headers }) => {
   const token = localStorage.getItem("token");
   return { headers: { ...headers, authorization: token ? `Bearer ${token}` : "" } };
@@ -955,31 +1803,46 @@ import { useNavigate } from "react-router-dom";
 import { Button, TextField, Box, Typography } from "@mui/material";
 import { LOGIN_MUTATION } from "../graphql/operations";
 import { useAuth } from "./AuthContext";
+import { validateEmail, validateRequired, ERROR_MESSAGES } from "../utils/validation";
+import { useErrorHandler } from "../errors/useErrorHandler";
+import ErrorSnackbar from "../errors/ErrorSnackbar";
 
 export default function LoginPage() {
   const [correo, setCorreo] = useState("");
   const [pass, setPass] = useState("");
+  const [formError, setFormError] = useState("");
   const [loginMutation] = useMutation(LOGIN_MUTATION);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const { error, showError, clearError } = useErrorHandler();
 
   const handleLogin = async (e) => {
     e.preventDefault();
+    setFormError("");
+    if (!validateRequired(correo) || !validateEmail(correo)) {
+      setFormError(ERROR_MESSAGES.formatoEmailInvalido);
+      return;
+    }
+    if (!validateRequired(pass)) {
+      setFormError(ERROR_MESSAGES.campoRequerido);
+      return;
+    }
     try {
       const { data } = await loginMutation({ variables: { correo, contrasena: pass } });
       login(data.login.token, data.login.usuario);
       navigate("/");
-    } catch (err) { alert("Error: " + err.message); }
+    } catch (err) { showError(err.message); }
   };
 
   return (
     <Box sx={{ maxWidth: 400, mx: "auto", mt: 10 }}>
       <Typography variant="h4" mb={2}>Login</Typography>
       <form onSubmit={handleLogin}>
-        <TextField fullWidth label="Correo" margin="normal" value={correo} onChange={e=>setCorreo(e.target.value)} />
-        <TextField fullWidth label="Contrasena" type="password" margin="normal" value={pass} onChange={e=>setPass(e.target.value)} />
+        <TextField fullWidth label="Correo" margin="normal" value={correo} onChange={e=>setCorreo(e.target.value)} error={!!formError} />
+        <TextField fullWidth label="Contrasena" type="password" margin="normal" value={pass} onChange={e=>setPass(e.target.value)} error={!!formError} helperText={formError} />
         <Button fullWidth variant="contained" type="submit" sx={{ mt: 2 }}>Entrar</Button>
       </form>
+      <ErrorSnackbar open={!!error} message={error} onClose={clearError} />
     </Box>
   );
 }
