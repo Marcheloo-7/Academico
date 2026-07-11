@@ -69,10 +69,14 @@ Write-Host "===== CA-004: Sistema de Diseno =====" -ForegroundColor Cyan
 # Se usa Vite en lugar de Create React App por su velocidad de arranque,
 # soporte nativo de HMR y mejor rendimiento en desarrollo.
 # El flag --template react selecciona la plantilla de React con JavaScript.
-npx -y create-vite@latest $FRONTEND_DIR -- --template react
+# Se ejecuta con Push-Location + "." (ruta relativa) en vez de pasar la ruta
+# absoluta con backslashes: si el proceso npx/npm delega en un shell tipo
+# bash (p.ej. al lanzar el script desde Git Bash), los backslashes se
+# interpretan como escapes y corrompen el nombre de la carpeta destino.
+Push-Location $FRONTEND_DIR
+npx -y create-vite@latest . -- --template react
 
 # Instalar dependencias base del proyecto React reciÃ©n creado
-Push-Location $FRONTEND_DIR
 npm install --yes
 
 # Instalar MUI (Material UI) como librerÃ­a de componentes del sistema de diseÃ±o.
