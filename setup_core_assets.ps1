@@ -188,71 +188,22 @@ Write-Host "  [OK] Configuracion de roles completada" -ForegroundColor Green
 
 # ===========================================================================
 # CA-002 â€” GestiÃ³n de Usuarios (mÃ³dulos funcionales del producto)
-# Configurador interactivo: pregunta quÃ© mÃ³dulos incluir en el producto.
-# Instala dependencias condicionales y crea la estructura de carpetas.
+# Instala dependencias necesarias para los datos de usuario.
+# Los 4 modulos (Estudiante, Docente, Cursos, Inscripciones) se generan
+# siempre como parte fija del esqueleto en New-ProjectSkeleton
+# (backend/core/ca002_usuarios/) — no existe un flag de inclusion opcional,
+# asi que aqui ya no se pregunta ni se crean carpetas placeholder sueltas
+# que ningun otro archivo del proyecto termina usando.
 # ===========================================================================
 
 Write-Host ""
 Write-Host "===== CA-002: Gestion de Usuarios =====" -ForegroundColor Cyan
-Write-Host "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
-Write-Host "  Configurador de modulos funcionales del producto."
-Write-Host "  Seleccione que modulos desea incluir."
-Write-Host "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
 
 # Instalar email-validator (necesario para EmailStr en Pydantic si se
 # incluye cualquier mÃ³dulo con datos de usuario).
 pip install --quiet email-validator
 
-# Crear directorio base para los mÃ³dulos del backend
-$modulesDir = Join-Path $BACKEND_DIR "app\modules"
-New-Item -ItemType Directory -Force -Path $modulesDir | Out-Null
-
-# --- MÃ³dulo: Estudiante ---
-if (Ask-YesNo "  Desea incluir el modulo Estudiante (CRUD)? (s/n)") {
-    $modDir = Join-Path $modulesDir "estudiante"
-    New-Item -ItemType Directory -Force -Path $modDir | Out-Null
-    New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
-    Write-Host "  [OK] Modulo 'Estudiante' incluido -> backend/app/modules/estudiante/" -ForegroundColor Green
-}
-else {
-    Write-Host "  [X] Modulo 'Estudiante' omitido" -ForegroundColor DarkGray
-}
-
-# --- MÃ³dulo: Docente ---
-if (Ask-YesNo "  Desea incluir el modulo Docente (CRUD)? (s/n)") {
-    $modDir = Join-Path $modulesDir "docente"
-    New-Item -ItemType Directory -Force -Path $modDir | Out-Null
-    New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
-    Write-Host "  [OK] Modulo 'Docente' incluido -> backend/app/modules/docente/" -ForegroundColor Green
-}
-else {
-    Write-Host "  [X] Modulo 'Docente' omitido" -ForegroundColor DarkGray
-}
-
-# --- MÃ³dulo: Cursos ---
-if (Ask-YesNo "  Desea incluir el modulo Cursos (nombre, docente a cargo, estudiantes, periodo)? (s/n)") {
-    $modDir = Join-Path $modulesDir "cursos"
-    New-Item -ItemType Directory -Force -Path $modDir | Out-Null
-    New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
-    Write-Host "  [OK] Modulo 'Cursos' incluido -> backend/app/modules/cursos/" -ForegroundColor Green
-}
-else {
-    Write-Host "  [X] Modulo 'Cursos' omitido" -ForegroundColor DarkGray
-}
-
-# --- MÃ³dulo: Inscripciones ---
-if (Ask-YesNo "  Desea incluir el modulo Inscripciones (con validaciones de cupo, duplicidad y periodo)? (s/n)") {
-    $modDir = Join-Path $modulesDir "inscripciones"
-    New-Item -ItemType Directory -Force -Path $modDir | Out-Null
-    New-Item -ItemType File -Force -Path (Join-Path $modDir "__init__.py") | Out-Null
-    Write-Host "  [OK] Modulo 'Inscripciones' incluido -> backend/app/modules/inscripciones/" -ForegroundColor Green
-}
-else {
-    Write-Host "  [X] Modulo 'Inscripciones' omitido" -ForegroundColor DarkGray
-}
-
-Write-Host ""
-Write-Host "  [OK] Configuracion de modulos completada" -ForegroundColor Green
+Write-Host "  [OK] Dependencias de gestion de usuarios instaladas" -ForegroundColor Green
 
 
 # ===========================================================================
@@ -487,14 +438,17 @@ class TokenPayload(BaseModel):
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+from dotenv import load_dotenv
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi import HTTPException, status
 from .schemas import TokenPayload
 
-SECRET_KEY = os.getenv("SECRET_KEY", "super_secret_key_123")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+load_dotenv()
+
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "super_secret_key_123")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -773,6 +727,7 @@ class CursoInput:
 
     $content_gql_schema = @'
 import strawberry
+from strawberry.schema.config import StrawberryConfig
 from strawberry.types import Info
 from typing import Optional, List
 from .types import (
@@ -832,7 +787,7 @@ class Mutation:
         db.refresh(nuevo)
         return nuevo
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+schema = strawberry.Schema(query=Query, mutation=Mutation, config=StrawberryConfig(auto_camel_case=False))
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\schema.py") -Content $content_gql_schema
 
@@ -1030,7 +985,7 @@ export default function LoginPage() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\auth\LoginPage.jsx") -Content $content_fe_login
 
     $content_fe_layout = @'
-import { Box, Drawer, List, ListItem, ListItemText, AppBar, Toolbar, Typography, Button } from "@mui/material";
+import { Box, Drawer, List, ListItem, ListItemButton, ListItemText, AppBar, Toolbar, Typography, Button } from "@mui/material";
 import { useNavigate, Outlet } from "react-router-dom";
 import { useAuth } from "../../auth/AuthContext";
 
@@ -1057,8 +1012,10 @@ export default function Layout() {
         <Toolbar />
         <List>
           {menu.map(m => (
-            <ListItem button key={m.text} onClick={() => navigate(m.path)}>
-              <ListItemText primary={m.text} />
+            <ListItem key={m.text} disablePadding>
+              <ListItemButton onClick={() => navigate(m.path)}>
+                <ListItemText primary={m.text} />
+              </ListItemButton>
             </ListItem>
           ))}
         </List>
