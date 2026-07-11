@@ -92,9 +92,20 @@ npm install --save @mui/material @mui/icons-material @emotion/react @emotion/sty
 # creaciÃ³n de themes personalizados, breakpoints, paleta de colores).
 npm install --save @mui/system
 
+# Instalar las tipografias de la identidad visual "Acta Academica":
+# Fraunces (display), IBM Plex Sans (texto) e IBM Plex Mono (datos/codigos).
+# Se auto-hospedan via @fontsource en vez de un <link> a Google Fonts para
+# que el build no dependa de una peticion externa en tiempo de ejecucion.
+npm install --save @fontsource/fraunces @fontsource/ibm-plex-sans @fontsource/ibm-plex-mono
+
+# Ajustar el titulo del index.html generado por create-vite (el titulo por
+# defecto queda vacio o generico segun el nombre de carpeta usado).
+$indexHtmlPath = Join-Path $FRONTEND_DIR "index.html"
+(Get-Content $indexHtmlPath -Raw) -replace '<title>.*?</title>', '<title>SGA - Sistema de Gestion Academica</title>' | Set-Content $indexHtmlPath -Encoding UTF8
+
 Pop-Location
 
-Write-Host "  [OK] Proyecto React (Vite) creado y librerias de diseno (MUI) instaladas" -ForegroundColor Green
+Write-Host "  [OK] Proyecto React (Vite) creado, librerias de diseno (MUI) y tipografias instaladas" -ForegroundColor Green
 
 
 # ===========================================================================
@@ -380,6 +391,7 @@ function New-ProjectSkeleton {
         (Join-Path $FRONTEND_DIR "src\modules\docentes"),
         (Join-Path $FRONTEND_DIR "src\modules\cursos"),
         (Join-Path $FRONTEND_DIR "src\modules\inscripciones"),
+        (Join-Path $FRONTEND_DIR "src\modules\inicio"),
         (Join-Path $FRONTEND_DIR "src\auth"),
         (Join-Path $FRONTEND_DIR "src\graphql"),
         (Join-Path $FRONTEND_DIR "src\utils"),
@@ -702,6 +714,16 @@ def crear_estudiante(datos: schemas.EstudianteCreate, db: Session = Depends(get_
     nuevo = services.crear_estudiante(db, datos)
     registrar_auditoria(db, usuario=token.sub, recurso="estudiante", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "codigo": nuevo.codigo})
     return nuevo
+
+@router.get("/docentes", response_model=List[schemas.DocenteResponse])
+def listar_docentes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
+    return services.listar_docentes(db, filtro)
+
+@router.post("/docentes", response_model=schemas.DocenteResponse)
+def crear_docente(datos: schemas.DocenteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    nuevo = services.crear_docente(db, datos)
+    registrar_auditoria(db, usuario=token.sub, recurso="docente", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "correo": nuevo.correo})
+    return nuevo
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\router.py") -Content $content_usr_router
 
@@ -806,6 +828,12 @@ class CursoInput:
     nombre: str
     docente_id: int
     periodo_academico: str
+
+@strawberry.input
+class InscripcionInput:
+    estudiante_id: int
+    curso_id: int
+    estado: str = "activa"
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\types.py") -Content $content_gql_types
 
@@ -818,18 +846,36 @@ from core.ca008_errores.graphql_errors import AcademicoSchema
 from .types import (
     UsuarioType, DocenteType, EstudianteType,
     CursoType, InscripcionType, AuthPayload,
-    EstudianteInput, DocenteInput, CursoInput,
+    EstudianteInput, DocenteInput, CursoInput, InscripcionInput,
 )
 from core.ca005_db.models import Estudiante, Docente, Curso, Inscripcion, Usuario
-from core.ca001_auth.security import create_access_token, verify_password
+from core.ca001_auth.security import create_access_token, verify_password, verify_token
+from core.ca009_auditoria.services import registrar_auditoria
 
 def get_db_from_info(info: Info):
     return info.context["db"]
+
+def get_usuario_actual(info: Info, *roles: str):
+    # No existe middleware global de autenticacion para GraphQL (a diferencia
+    # de REST, que usa requiere_rol de core.ca003_roles.dependencies); cada
+    # query/mutation que necesita proteger acceso o saber "quien" actua
+    # (para auditoria) llama a este helper, que valida el Authorization
+    # header manualmente y opcionalmente exige uno de los roles indicados.
+    request = info.context.get("request")
+    auth_header = request.headers.get("authorization") if request else None
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        raise Exception("No autorizado")
+    token = auth_header.split(" ", 1)[1]
+    usuario = verify_token(token)
+    if roles and usuario.rol not in roles:
+        raise Exception("Permiso denegado")
+    return usuario
 
 @strawberry.type
 class Query:
     @strawberry.field
     def estudiantes(self, info: Info, filtro: Optional[str] = None) -> List[EstudianteType]:
+        get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
         q = db.query(Estudiante)
         if filtro: q = q.filter(Estudiante.nombre.ilike(f"%{filtro}%"))
@@ -837,6 +883,7 @@ class Query:
 
     @strawberry.field
     def docentes(self, info: Info, filtro: Optional[str] = None) -> List[DocenteType]:
+        get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
         q = db.query(Docente)
         if filtro: q = q.filter(Docente.nombre.ilike(f"%{filtro}%"))
@@ -844,11 +891,13 @@ class Query:
 
     @strawberry.field
     def cursos(self, info: Info, filtro: Optional[str] = None) -> List[CursoType]:
+        get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
         return db.query(Curso).all()
 
     @strawberry.field
     def inscripciones(self, info: Info, filtro: Optional[str] = None) -> List[InscripcionType]:
+        get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
         return db.query(Inscripcion).all()
 
@@ -865,12 +914,36 @@ class Mutation:
 
     @strawberry.mutation
     def crear_estudiante(self, info: Info, datos: EstudianteInput) -> EstudianteType:
+        usuario = get_usuario_actual(info, "administrador")
         db = get_db_from_info(info)
         nuevo = Estudiante(**datos.__dict__)
         db.add(nuevo)
         db.commit()
         db.refresh(nuevo)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="estudiante", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "codigo": nuevo.codigo})
         return nuevo
+
+    @strawberry.mutation
+    def crear_curso(self, info: Info, datos: CursoInput) -> CursoType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        nuevo = Curso(**datos.__dict__)
+        db.add(nuevo)
+        db.commit()
+        db.refresh(nuevo)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="curso", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "periodo_academico": nuevo.periodo_academico})
+        return nuevo
+
+    @strawberry.mutation
+    def crear_inscripcion(self, info: Info, datos: InscripcionInput) -> InscripcionType:
+        usuario = get_usuario_actual(info, "administrador", "docente")
+        db = get_db_from_info(info)
+        nueva = Inscripcion(**datos.__dict__)
+        db.add(nueva)
+        db.commit()
+        db.refresh(nueva)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="inscripcion", accion="crear", valores_nuevos={"estudiante_id": nueva.estudiante_id, "curso_id": nueva.curso_id, "estado": nueva.estado})
+        return nueva
 
 schema = AcademicoSchema(query=Query, mutation=Mutation, config=StrawberryConfig(auto_camel_case=False))
 '@
@@ -1759,11 +1832,213 @@ export const GET_ESTUDIANTES = gql`
 
     $content_fe_theme = @'
 import { createTheme } from "@mui/material/styles";
+
+// Sistema de Gestion Academica -- direccion "Acta Academica":
+// la identidad visual del libro de actas y la cedula institucional,
+// no la de un dashboard SaaS generico. Paleta fria de papel de archivo,
+// tinta azul-marino, un oro institucional como unico acento vivo, y un
+// rojo-oxido reservado exclusivamente para estados negativos.
+const ink = "#141B2E";
+const inkMuted = "#565F55";
+const paper = "#EEF0EA";
+const paperElevated = "#F8F9F4";
+const gold = "#B8872B";
+const goldDark = "#8E6A20";
+const sage = "#4F6B4A";
+const rust = "#9C4632";
+const line = "#D2D5C7";
+
+export const academic = { ink, inkMuted, paper, paperElevated, gold, goldDark, sage, rust, line };
+
 export const theme = createTheme({
-  palette: { primary: { main: "#1976d2" }, secondary: { main: "#dc004e" } }
+  palette: {
+    mode: "light",
+    primary: { main: gold, dark: goldDark, contrastText: ink },
+    secondary: { main: ink, contrastText: paperElevated },
+    success: { main: sage },
+    error: { main: rust },
+    background: { default: paper, paper: paperElevated },
+    text: { primary: ink, secondary: inkMuted },
+    divider: line,
+  },
+  shape: { borderRadius: 3 },
+  typography: {
+    fontFamily: '"IBM Plex Sans", "Helvetica Neue", Arial, sans-serif',
+    h1: { fontFamily: '"Fraunces", serif', fontWeight: 600 },
+    h2: { fontFamily: '"Fraunces", serif', fontWeight: 600 },
+    h3: { fontFamily: '"Fraunces", serif', fontWeight: 600, letterSpacing: "-0.01em" },
+    h4: { fontFamily: '"Fraunces", serif', fontWeight: 600, letterSpacing: "-0.01em" },
+    h5: { fontFamily: '"Fraunces", serif', fontWeight: 500, fontStyle: "italic" },
+    h6: { fontFamily: '"Fraunces", serif', fontWeight: 500 },
+    subtitle1: { fontFamily: '"IBM Plex Sans", sans-serif', color: inkMuted },
+    subtitle2: { fontFamily: '"IBM Plex Sans", sans-serif', color: inkMuted, fontWeight: 500 },
+    button: { fontFamily: '"IBM Plex Sans", sans-serif', fontWeight: 600, letterSpacing: "0.05em" },
+    overline: { fontFamily: '"IBM Plex Mono", monospace', letterSpacing: "0.08em" },
+    caption: { fontFamily: '"IBM Plex Mono", monospace' },
+  },
+  components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        body: { backgroundColor: paper },
+      },
+    },
+    MuiAppBar: {
+      styleOverrides: {
+        root: {
+          backgroundColor: ink,
+          color: paperElevated,
+          boxShadow: "none",
+          borderBottom: `2px solid ${gold}`,
+        },
+      },
+    },
+    MuiDrawer: {
+      styleOverrides: {
+        paper: {
+          backgroundColor: paperElevated,
+          borderRight: `1px solid ${line}`,
+          boxShadow: "none",
+        },
+      },
+    },
+    MuiListItemButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 0,
+          borderLeft: "3px solid transparent",
+          paddingTop: 10,
+          paddingBottom: 10,
+          "&:hover": { backgroundColor: "rgba(20,27,46,0.04)" },
+          "&.Mui-selected": {
+            borderLeft: `3px solid ${gold}`,
+            backgroundColor: "rgba(184,135,43,0.08)",
+          },
+          "&.Mui-selected:hover": { backgroundColor: "rgba(184,135,43,0.12)" },
+        },
+      },
+    },
+    MuiButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 3,
+          boxShadow: "none",
+          textTransform: "uppercase",
+          paddingTop: 10,
+          paddingBottom: 10,
+        },
+        contained: {
+          boxShadow: "none",
+          "&:hover": { boxShadow: "none" },
+        },
+        outlined: { borderWidth: 1.5, "&:hover": { borderWidth: 1.5 } },
+      },
+    },
+    MuiPaper: {
+      styleOverrides: {
+        root: { backgroundImage: "none" },
+        outlined: { borderColor: line },
+        elevation1: { boxShadow: "none", border: `1px solid ${line}` },
+      },
+    },
+    MuiTableCell: {
+      styleOverrides: {
+        root: { borderBottom: `1px solid ${line}`, padding: "14px 16px" },
+        head: {
+          fontFamily: '"IBM Plex Mono", monospace',
+          fontSize: "0.72rem",
+          letterSpacing: "0.07em",
+          textTransform: "uppercase",
+          color: inkMuted,
+          borderBottom: `2px solid ${ink}`,
+        },
+      },
+    },
+    MuiOutlinedInput: {
+      styleOverrides: {
+        root: {
+          borderRadius: 3,
+          "& fieldset": { borderColor: line },
+          "&:hover fieldset": { borderColor: inkMuted },
+          "&.Mui-focused fieldset": { borderColor: gold, borderWidth: 1.5 },
+        },
+      },
+    },
+  },
 });
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\theme.js") -Content $content_fe_theme
+
+    $content_fe_pageheader = @'
+import { Box, Typography } from "@mui/material";
+import { academic } from "../../theme";
+
+// Encabezado de seccion con el tratamiento de "libro de actas": un
+// eyebrow en mono, el titulo en Fraunces, y una doble regla debajo
+// (una fina y una gruesa) como en el encabezado de una hoja de registro.
+export default function PageHeader({ eyebrow, title, action }) {
+  return (
+    <Box sx={{ mb: 4 }}>
+      <Box sx={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", flexWrap: "wrap", gap: 2 }}>
+        <Box>
+          {eyebrow && (
+            <Typography
+              variant="overline"
+              sx={{ color: academic.gold, display: "block", mb: 0.5, fontWeight: 500 }}
+            >
+              {eyebrow}
+            </Typography>
+          )}
+          <Typography variant="h4">{title}</Typography>
+        </Box>
+        {action}
+      </Box>
+      <Box sx={{ mt: 1.5, height: 3, borderTop: `1px solid ${academic.line}`, borderBottom: `2px solid ${academic.ink}` }} />
+    </Box>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\PageHeader.jsx") -Content $content_fe_pageheader
+
+    $content_fe_statusstamp = @'
+import { Box } from "@mui/material";
+import { academic } from "../../theme";
+
+const ESTADOS = {
+  activa: { label: "Activa", color: academic.sage },
+  cerrada: { label: "Cerrada", color: academic.inkMuted },
+  cupo_lleno: { label: "Cupo lleno", color: academic.rust },
+};
+
+// El elemento firma del sistema: un badge de estado con la forma de un
+// sello de tinta -- doble borde, esquinas casi rectas, una leve
+// inclinacion -- en vez del chip solido y plano de un dashboard tipico.
+export default function StatusStamp({ estado }) {
+  const info = ESTADOS[estado] || { label: estado, color: academic.inkMuted };
+  return (
+    <Box
+      component="span"
+      sx={{
+        display: "inline-flex",
+        alignItems: "center",
+        fontFamily: '"IBM Plex Mono", monospace',
+        fontSize: "0.7rem",
+        fontWeight: 500,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        color: info.color,
+        border: `1.5px solid ${info.color}`,
+        borderRadius: "2px",
+        padding: "3px 10px",
+        transform: "rotate(-1.5deg)",
+        boxShadow: `0 0 0 1px ${info.color}33 inset`,
+      }}
+    >
+      {info.label}
+    </Box>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\StatusStamp.jsx") -Content $content_fe_statusstamp
 
     $content_fe_auth_ctx = @'
 import { createContext, useContext, useState, useEffect } from "react";
@@ -1800,12 +2075,13 @@ export const useAuth = () => useContext(AuthContext);
 import { useState } from "react";
 import { useMutation } from "@apollo/client";
 import { useNavigate } from "react-router-dom";
-import { Button, TextField, Box, Typography } from "@mui/material";
+import { Button, TextField, Box, Typography, Paper } from "@mui/material";
 import { LOGIN_MUTATION } from "../graphql/operations";
 import { useAuth } from "./AuthContext";
 import { validateEmail, validateRequired, ERROR_MESSAGES } from "../utils/validation";
 import { useErrorHandler } from "../errors/useErrorHandler";
 import ErrorSnackbar from "../errors/ErrorSnackbar";
+import { academic } from "../theme";
 
 export default function LoginPage() {
   const [correo, setCorreo] = useState("");
@@ -1835,13 +2111,67 @@ export default function LoginPage() {
   };
 
   return (
-    <Box sx={{ maxWidth: 400, mx: "auto", mt: 10 }}>
-      <Typography variant="h4" mb={2}>Login</Typography>
-      <form onSubmit={handleLogin}>
-        <TextField fullWidth label="Correo" margin="normal" value={correo} onChange={e=>setCorreo(e.target.value)} error={!!formError} />
-        <TextField fullWidth label="Contrasena" type="password" margin="normal" value={pass} onChange={e=>setPass(e.target.value)} error={!!formError} helperText={formError} />
-        <Button fullWidth variant="contained" type="submit" sx={{ mt: 2 }}>Entrar</Button>
-      </form>
+    <Box
+      sx={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        bgcolor: academic.ink,
+        px: 2,
+      }}
+    >
+      <Paper
+        elevation={0}
+        sx={{
+          width: "100%",
+          maxWidth: 420,
+          p: 5,
+          pt: 4.5,
+          borderTop: `4px solid ${academic.gold}`,
+          bgcolor: academic.paperElevated,
+        }}
+      >
+        <Typography variant="overline" sx={{ color: academic.gold, fontWeight: 500, textAlign: "center", display: "block" }}>
+          Acceso institucional
+        </Typography>
+        <Typography variant="h4" sx={{ mt: 0.5, mb: 0.5, textAlign: "center" }}>
+          Iniciar sesion
+        </Typography>
+        <Typography variant="subtitle1" sx={{ mb: 4 }}>
+          Ingresa tus credenciales para acceder al sistema.
+        </Typography>
+
+        <form onSubmit={handleLogin} noValidate>
+          <Typography variant="caption" sx={{ color: academic.inkMuted, letterSpacing: "0.06em" }}>
+            CORREO INSTITUCIONAL
+          </Typography>
+          <TextField
+            fullWidth
+            margin="dense"
+            placeholder="nombre@academico.com"
+            value={correo}
+            onChange={(e) => setCorreo(e.target.value)}
+            error={!!formError}
+            sx={{ mb: 2.5 }}
+          />
+          <Typography variant="caption" sx={{ color: academic.inkMuted, letterSpacing: "0.06em" }}>
+            CONTRASENA
+          </Typography>
+          <TextField
+            fullWidth
+            margin="dense"
+            type="password"
+            value={pass}
+            onChange={(e) => setPass(e.target.value)}
+            error={!!formError}
+            helperText={formError}
+          />
+          <Button fullWidth variant="contained" type="submit" size="large" sx={{ mt: 3.5 }}>
+            Entrar
+          </Button>
+        </form>
+      </Paper>
       <ErrorSnackbar open={!!error} message={error} onClose={clearError} />
     </Box>
   );
@@ -1851,41 +2181,89 @@ export default function LoginPage() {
 
     $content_fe_layout = @'
 import { Box, Drawer, List, ListItem, ListItemButton, ListItemText, AppBar, Toolbar, Typography, Button } from "@mui/material";
-import { useNavigate, Outlet } from "react-router-dom";
+import { useNavigate, useLocation, Outlet } from "react-router-dom";
 import { useAuth } from "../../auth/AuthContext";
+import { academic } from "../../theme";
+
+const DRAWER_WIDTH = 248;
 
 export default function Layout() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { user, logout } = useAuth();
   if (!user) return <Outlet />;
 
   const menu = [
-    { text: "Estudiantes", path: "/estudiantes" },
-    { text: "Docentes", path: "/docentes" },
-    { text: "Cursos", path: "/cursos" },
-    { text: "Inscripciones", path: "/inscripciones" }
+    { index: "01", text: "Estudiantes", path: "/estudiantes" },
+    { index: "02", text: "Docentes", path: "/docentes" },
+    { index: "03", text: "Cursos", path: "/cursos" },
+    { index: "04", text: "Inscripciones", path: "/inscripciones" },
   ];
 
   return (
     <Box sx={{ display: "flex" }}>
-      <AppBar position="fixed" sx={{ zIndex: 1201 }}><Toolbar>
-        <Typography variant="h6" sx={{ flexGrow: 1 }}>SGA</Typography>
-        <Typography sx={{ mr: 2 }}>{user.correo}</Typography>
-        <Button color="inherit" onClick={() => { logout(); navigate("/login"); }}>Salir</Button>
-      </Toolbar></AppBar>
-      <Drawer variant="permanent" sx={{ width: 240, flexShrink: 0, [`& .MuiDrawer-paper`]: { width: 240, boxSizing: 'border-box' } }}>
+      <AppBar position="fixed" sx={{ zIndex: 1201 }}>
+        <Toolbar sx={{ gap: 2 }}>
+          <Typography variant="h6" sx={{ flexGrow: 1, letterSpacing: "0.02em" }}>
+            SGA <Box component="span" sx={{ color: academic.gold }}>&middot;</Box> Sistema de Gestion Academica
+          </Typography>
+          <Typography
+            sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.8rem", opacity: 0.85 }}
+          >
+            {user.correo}
+          </Typography>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => { logout(); navigate("/login"); }}
+            sx={{ color: academic.paperElevated, borderColor: "rgba(248,249,244,0.4)", "&:hover": { borderColor: academic.gold } }}
+          >
+            Salir
+          </Button>
+        </Toolbar>
+      </AppBar>
+      <Drawer
+        variant="permanent"
+        sx={{ width: DRAWER_WIDTH, flexShrink: 0, [`& .MuiDrawer-paper`]: { width: DRAWER_WIDTH, boxSizing: "border-box" } }}
+      >
         <Toolbar />
-        <List>
-          {menu.map(m => (
-            <ListItem key={m.text} disablePadding>
-              <ListItemButton onClick={() => navigate(m.path)}>
-                <ListItemText primary={m.text} />
-              </ListItemButton>
-            </ListItem>
-          ))}
+        <Typography
+          variant="overline"
+          sx={{ px: 2.5, pt: 2.5, pb: 1, display: "block", color: academic.inkMuted }}
+        >
+          Indice
+        </Typography>
+        <List sx={{ px: 0 }}>
+          {menu.map((m) => {
+            const selected = location.pathname.startsWith(m.path);
+            return (
+              <ListItem key={m.text} disablePadding>
+                <ListItemButton selected={selected} onClick={() => navigate(m.path)} sx={{ px: 2.5 }}>
+                  <Typography
+                    sx={{
+                      fontFamily: '"IBM Plex Mono", monospace',
+                      fontSize: "0.75rem",
+                      color: selected ? academic.gold : academic.inkMuted,
+                      mr: 1.5,
+                      minWidth: 20,
+                    }}
+                  >
+                    {m.index}
+                  </Typography>
+                  <ListItemText
+                    primary={m.text}
+                    primaryTypographyProps={{ fontWeight: selected ? 600 : 400 }}
+                  />
+                </ListItemButton>
+              </ListItem>
+            );
+          })}
         </List>
       </Drawer>
-      <Box component="main" sx={{ flexGrow: 1, p: 3 }}><Toolbar /><Outlet /></Box>
+      <Box component="main" sx={{ flexGrow: 1, p: 4, bgcolor: "background.default", minHeight: "100vh" }}>
+        <Toolbar />
+        <Outlet />
+      </Box>
     </Box>
   );
 }
@@ -1895,22 +2273,52 @@ export default function Layout() {
     $content_fe_estudiantes = @'
 import { useQuery } from "@apollo/client";
 import { GET_ESTUDIANTES } from "../../graphql/operations";
-import { Typography, List, ListItem, ListItemText, CircularProgress } from "@mui/material";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import PageHeader from "../../design-system/components/PageHeader";
 
 export default function EstudiantesPage() {
   const { data, loading, error } = useQuery(GET_ESTUDIANTES);
-  if (loading) return <CircularProgress />;
-  if (error) return <Typography color="error">Error: {error.message}</Typography>;
 
   return (
-    <div>
-      <Typography variant="h4">Estudiantes</Typography>
-      <List>
-        {data.estudiantes.map(e => (
-          <ListItem key={e.id}><ListItemText primary={e.nombre} secondary={e.correo} /></ListItem>
-        ))}
-      </List>
-    </div>
+    <Box>
+      <PageHeader
+        eyebrow="Registro 01"
+        title="Estudiantes"
+        action={data && (
+          <Typography variant="caption" sx={{ color: "text.secondary" }}>
+            {data.estudiantes.length} matriculados
+          </Typography>
+        )}
+      />
+
+      {loading && <CircularProgress size={24} />}
+      {error && <Typography color="error">Error: {error.message}</Typography>}
+
+      {data && (
+        <Paper variant="outlined">
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell width={110}>Codigo</TableCell>
+                <TableCell>Nombre</TableCell>
+                <TableCell>Correo</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {data.estudiantes.map((e) => (
+                <TableRow key={e.id} hover>
+                  <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem" }}>
+                    {e.codigo}
+                  </TableCell>
+                  <TableCell sx={{ fontWeight: 500 }}>{e.nombre}</TableCell>
+                  <TableCell sx={{ color: "text.secondary" }}>{e.correo}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+    </Box>
   );
 }
 '@
@@ -1921,7 +2329,16 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { ApolloProvider } from "@apollo/client"
 import { ThemeProvider } from "@mui/material/styles"
+import CssBaseline from "@mui/material/CssBaseline"
 import { BrowserRouter } from "react-router-dom"
+import "@fontsource/fraunces/500.css"
+import "@fontsource/fraunces/600.css"
+import "@fontsource/fraunces/600-italic.css"
+import "@fontsource/ibm-plex-sans/400.css"
+import "@fontsource/ibm-plex-sans/500.css"
+import "@fontsource/ibm-plex-sans/600.css"
+import "@fontsource/ibm-plex-mono/400.css"
+import "@fontsource/ibm-plex-mono/500.css"
 import App from './App'
 import { client } from "./graphql/client"
 import { theme } from "./theme"
@@ -1931,6 +2348,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <ApolloProvider client={client}>
       <ThemeProvider theme={theme}>
+        <CssBaseline />
         <AuthProvider>
           <BrowserRouter>
             <App />
@@ -1943,16 +2361,76 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\main.jsx") -Content $content_fe_main
 
+    $content_fe_inicio = @'
+import { Box, Typography, Paper } from "@mui/material";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../auth/AuthContext";
+import { academic } from "../../theme";
+
+const SECCIONES = [
+  { index: "01", text: "Estudiantes", path: "/estudiantes", desc: "Matricula y datos de contacto" },
+  { index: "02", text: "Docentes", path: "/docentes", desc: "Planta docente y especialidades" },
+  { index: "03", text: "Cursos", path: "/cursos", desc: "Oferta academica por periodo" },
+  { index: "04", text: "Inscripciones", path: "/inscripciones", desc: "Movimientos de matricula" },
+];
+
+export default function InicioPage() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+
+  return (
+    <Box>
+      <Typography variant="overline" sx={{ color: academic.gold, fontWeight: 500 }}>
+        Panel principal
+      </Typography>
+      <Typography variant="h3" sx={{ mt: 0.5 }}>
+        Bienvenido
+      </Typography>
+      <Typography variant="subtitle1" sx={{ mt: 0.5, mb: 4 }}>
+        Sesion iniciada como <strong>{user?.correo}</strong> &middot; rol {user?.rol}
+      </Typography>
+
+      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
+        {SECCIONES.map((s) => (
+          <Paper
+            key={s.path}
+            variant="outlined"
+            onClick={() => navigate(s.path)}
+            sx={{
+              p: 2.5,
+              cursor: "pointer",
+              transition: "border-color 0.15s ease",
+              "&:hover": { borderColor: academic.gold },
+            }}
+          >
+            <Typography
+              sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.75rem", color: academic.gold }}
+            >
+              {s.index}
+            </Typography>
+            <Typography variant="h6" sx={{ mt: 0.5 }}>{s.text}</Typography>
+            <Typography variant="body2" sx={{ color: "text.secondary", mt: 0.25 }}>
+              {s.desc}
+            </Typography>
+          </Paper>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inicio\InicioPage.jsx") -Content $content_fe_inicio
+
     $content_fe_app = @'
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./auth/LoginPage";
 import Layout from "./design-system/components/Layout";
+import InicioPage from "./modules/inicio/InicioPage";
 import EstudiantesPage from "./modules/estudiantes/EstudiantesPage";
 import DocentesPage from "./modules/docentes/DocentesPage";
 import CursosPage from "./modules/cursos/CursosPage";
 import InscripcionesPage from "./modules/inscripciones/InscripcionesPage";
 import { useAuth } from "./auth/AuthContext";
-import { Typography } from "@mui/material";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -1965,7 +2443,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/" element={<Protected><Layout /></Protected>}>
-        <Route index element={<Typography variant="h5">Bienvenido</Typography>} />
+        <Route index element={<InicioPage />} />
         <Route path="estudiantes" element={<EstudiantesPage />} />
         <Route path="docentes" element={<DocentesPage />} />
         <Route path="cursos" element={<CursosPage />} />
@@ -1980,7 +2458,8 @@ export default function App() {
     # --- Frontend: Docentes, Cursos, Inscripciones ---
     $content_fe_docentes = @'
 import { useQuery, gql } from "@apollo/client";
-import { Typography, List, ListItem, ListItemText, CircularProgress } from "@mui/material";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import PageHeader from "../../design-system/components/PageHeader";
 
 const GET_DOCENTES = gql`
   query { docentes { id nombre correo especialidad } }
@@ -1988,18 +2467,45 @@ const GET_DOCENTES = gql`
 
 export default function DocentesPage() {
   const { data, loading, error } = useQuery(GET_DOCENTES);
-  if (loading) return <CircularProgress />;
-  if (error) return <Typography color="error">Error: {error.message}</Typography>;
 
   return (
-    <div>
-      <Typography variant="h4">Docentes</Typography>
-      <List>
-        {data.docentes.map(d => (
-          <ListItem key={d.id}><ListItemText primary={d.nombre} secondary={`${d.correo} - ${d.especialidad || 'Sin especialidad'}`} /></ListItem>
-        ))}
-      </List>
-    </div>
+    <Box>
+      <PageHeader
+        eyebrow="Registro 02"
+        title="Docentes"
+        action={data && (
+          <Typography variant="caption" sx={{ color: "text.secondary" }}>
+            {data.docentes.length} en planta
+          </Typography>
+        )}
+      />
+
+      {loading && <CircularProgress size={24} />}
+      {error && <Typography color="error">Error: {error.message}</Typography>}
+
+      {data && (
+        <Paper variant="outlined">
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>Nombre</TableCell>
+                <TableCell>Correo</TableCell>
+                <TableCell>Especialidad</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {data.docentes.map((d) => (
+                <TableRow key={d.id} hover>
+                  <TableCell sx={{ fontWeight: 500 }}>{d.nombre}</TableCell>
+                  <TableCell sx={{ color: "text.secondary" }}>{d.correo}</TableCell>
+                  <TableCell>{d.especialidad || "Sin especialidad"}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+    </Box>
   );
 }
 '@
@@ -2007,7 +2513,8 @@ export default function DocentesPage() {
 
     $content_fe_cursos = @'
 import { useQuery, gql } from "@apollo/client";
-import { Typography, List, ListItem, ListItemText, CircularProgress } from "@mui/material";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import PageHeader from "../../design-system/components/PageHeader";
 
 const GET_CURSOS = gql`
   query { cursos { id nombre periodo_academico } }
@@ -2015,18 +2522,45 @@ const GET_CURSOS = gql`
 
 export default function CursosPage() {
   const { data, loading, error } = useQuery(GET_CURSOS);
-  if (loading) return <CircularProgress />;
-  if (error) return <Typography color="error">Error: {error.message}</Typography>;
 
   return (
-    <div>
-      <Typography variant="h4">Cursos</Typography>
-      <List>
-        {data.cursos.map(c => (
-          <ListItem key={c.id}><ListItemText primary={c.nombre} secondary={`Periodo: ${c.periodo_academico}`} /></ListItem>
-        ))}
-      </List>
-    </div>
+    <Box>
+      <PageHeader
+        eyebrow="Registro 03"
+        title="Cursos"
+        action={data && (
+          <Typography variant="caption" sx={{ color: "text.secondary" }}>
+            {data.cursos.length} activos
+          </Typography>
+        )}
+      />
+
+      {loading && <CircularProgress size={24} />}
+      {error && <Typography color="error">Error: {error.message}</Typography>}
+
+      {data && (
+        <Paper variant="outlined">
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>Curso</TableCell>
+                <TableCell width={160}>Periodo</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {data.cursos.map((c) => (
+                <TableRow key={c.id} hover>
+                  <TableCell sx={{ fontWeight: 500 }}>{c.nombre}</TableCell>
+                  <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem", color: "text.secondary" }}>
+                    {c.periodo_academico}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+    </Box>
   );
 }
 '@
@@ -2034,7 +2568,9 @@ export default function CursosPage() {
 
     $content_fe_insc = @'
 import { useQuery, gql } from "@apollo/client";
-import { Typography, List, ListItem, ListItemText, CircularProgress } from "@mui/material";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import PageHeader from "../../design-system/components/PageHeader";
+import StatusStamp from "../../design-system/components/StatusStamp";
 
 const GET_INSC = gql`
   query { inscripciones { id estado } }
@@ -2042,22 +2578,199 @@ const GET_INSC = gql`
 
 export default function InscripcionesPage() {
   const { data, loading, error } = useQuery(GET_INSC);
-  if (loading) return <CircularProgress />;
-  if (error) return <Typography color="error">Error: {error.message}</Typography>;
 
   return (
-    <div>
-      <Typography variant="h4">Inscripciones</Typography>
-      <List>
-        {data.inscripciones.map(i => (
-          <ListItem key={i.id}><ListItemText primary={`Inscripcion #${i.id}`} secondary={`Estado: ${i.estado}`} /></ListItem>
-        ))}
-      </List>
-    </div>
+    <Box>
+      <PageHeader
+        eyebrow="Registro 04"
+        title="Inscripciones"
+        action={data && (
+          <Typography variant="caption" sx={{ color: "text.secondary" }}>
+            {data.inscripciones.length} movimientos
+          </Typography>
+        )}
+      />
+
+      {loading && <CircularProgress size={24} />}
+      {error && <Typography color="error">Error: {error.message}</Typography>}
+
+      {data && (
+        <Paper variant="outlined">
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell width={140}>Numero</TableCell>
+                <TableCell>Estado</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {data.inscripciones.map((i) => (
+                <TableRow key={i.id} hover>
+                  <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem" }}>
+                    #{String(i.id).padStart(4, "0")}
+                  </TableCell>
+                  <TableCell>
+                    <StatusStamp estado={i.estado} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+    </Box>
   );
 }
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inscripciones\InscripcionesPage.jsx") -Content $content_fe_insc
+
+    # Script de siembra de datos de ejemplo (no forma parte del catalogo
+    # de Core Assets CA-001 a CA-011; es una utilidad opcional para tener
+    # datos de prueba rapido en desarrollo). No se ejecuta automaticamente.
+    Write-Host ""
+    Write-Host "--- Script de siembra de datos de ejemplo ---" -ForegroundColor Cyan
+    $content_seed_data = @'
+"""
+Script de siembra de datos de ejemplo. NO forma parte del arranque
+automatico de la aplicacion (no se importa desde main.py).
+
+Ejecutar manualmente con:
+    cd backend
+    python seed_data.py
+
+Es idempotente: si una tabla ya tiene 5 filas o mas, no agrega nada;
+si tiene menos, completa hasta 5 usando datos de ejemplo que no
+choquen con los que ya existan (correo/codigo/nombre unicos).
+"""
+from core.ca005_db.database import SessionLocal, Base, engine
+from core.ca005_db.models import Usuario, Docente, Estudiante, Curso, Inscripcion
+from core.ca001_auth.security import get_password_hash
+
+Base.metadata.create_all(bind=engine)
+db = SessionLocal()
+
+META = 5
+
+
+def log(mensaje):
+    print(f"  {mensaje}")
+
+
+# --- Usuarios ---
+usuarios_candidatos = [
+    {"correo": "admin@academico.com", "contrasena": "admin123", "rol": "administrador"},
+    {"correo": "docente1@academico.com", "contrasena": "Docente123", "rol": "docente"},
+    {"correo": "maria.lopez@academico.com", "contrasena": "Docente123", "rol": "docente"},
+    {"correo": "juan.perez@academico.com", "contrasena": "Docente123", "rol": "docente"},
+    {"correo": "admin2@academico.com", "contrasena": "Admin123", "rol": "administrador"},
+]
+existentes = {u.correo for u in db.query(Usuario).all()}
+for c in usuarios_candidatos:
+    if len(existentes) >= META:
+        break
+    if c["correo"] in existentes:
+        continue
+    db.add(Usuario(correo=c["correo"], contrasena_hash=get_password_hash(c["contrasena"]), rol=c["rol"]))
+    existentes.add(c["correo"])
+    log(f"usuario creado: {c['correo']}")
+db.commit()
+
+usuarios_por_correo = {u.correo: u for u in db.query(Usuario).all()}
+
+# --- Docentes ---
+docentes_candidatos = [
+    {"nombre": "Prof Garcia", "correo": "garcia@academico.com", "especialidad": "Matematicas", "usuario_correo": None},
+    {"nombre": "Maria Lopez", "correo": "maria.lopez@academico.com", "especialidad": "Fisica", "usuario_correo": "maria.lopez@academico.com"},
+    {"nombre": "Juan Perez", "correo": "juan.perez@academico.com", "especialidad": "Programacion", "usuario_correo": "juan.perez@academico.com"},
+    {"nombre": "Laura Sanchez", "correo": "laura.sanchez@academico.com", "especialidad": "Quimica", "usuario_correo": None},
+    {"nombre": "Diego Torres", "correo": "diego.torres@academico.com", "especialidad": "Historia", "usuario_correo": None},
+]
+existentes = {d.correo for d in db.query(Docente).all()}
+for c in docentes_candidatos:
+    if len(existentes) >= META:
+        break
+    if c["correo"] in existentes:
+        continue
+    usuario_id = usuarios_por_correo[c["usuario_correo"]].id if c["usuario_correo"] else None
+    db.add(Docente(nombre=c["nombre"], correo=c["correo"], especialidad=c["especialidad"], usuario_id=usuario_id))
+    existentes.add(c["correo"])
+    log(f"docente creado: {c['nombre']}")
+db.commit()
+
+docentes_por_correo = {d.correo: d for d in db.query(Docente).all()}
+
+# --- Estudiantes ---
+estudiantes_candidatos = [
+    {"nombre": "Carlos Mendoza", "codigo": "C999", "correo": "carlos.mendoza@estudiante.edu", "datos_contacto": None},
+    {"nombre": "Ana Torres", "codigo": "A100", "correo": "ana.torres@estudiante.edu", "datos_contacto": None},
+    {"nombre": "Sofia Ramirez", "codigo": "E001", "correo": "sofia.ramirez@estudiante.edu", "datos_contacto": "099-111-2222"},
+    {"nombre": "Pedro Gomez", "codigo": "E002", "correo": "pedro.gomez@estudiante.edu", "datos_contacto": "099-222-3333"},
+    {"nombre": "Valentina Cruz", "codigo": "E003", "correo": "valentina.cruz@estudiante.edu", "datos_contacto": "099-333-4444"},
+]
+existentes = {e.codigo for e in db.query(Estudiante).all()}
+for c in estudiantes_candidatos:
+    if len(existentes) >= META:
+        break
+    if c["codigo"] in existentes:
+        continue
+    db.add(Estudiante(nombre=c["nombre"], codigo=c["codigo"], correo=c["correo"], datos_contacto=c["datos_contacto"]))
+    existentes.add(c["codigo"])
+    log(f"estudiante creado: {c['nombre']} ({c['codigo']})")
+db.commit()
+
+estudiantes_por_codigo = {e.codigo: e for e in db.query(Estudiante).all()}
+
+# --- Cursos ---
+cursos_candidatos = [
+    {"nombre": "Calculo I", "docente_correo": "garcia@academico.com", "periodo_academico": "2026-B"},
+    {"nombre": "Fisica I", "docente_correo": "maria.lopez@academico.com", "periodo_academico": "2026-B"},
+    {"nombre": "Programacion I", "docente_correo": "juan.perez@academico.com", "periodo_academico": "2026-B"},
+    {"nombre": "Quimica General", "docente_correo": "laura.sanchez@academico.com", "periodo_academico": "2026-A"},
+    {"nombre": "Historia Universal", "docente_correo": "diego.torres@academico.com", "periodo_academico": "2026-A"},
+]
+existentes = {c.nombre for c in db.query(Curso).all()}
+for c in cursos_candidatos:
+    if len(existentes) >= META:
+        break
+    if c["nombre"] in existentes:
+        continue
+    docente_id = docentes_por_correo[c["docente_correo"]].id
+    db.add(Curso(nombre=c["nombre"], docente_id=docente_id, periodo_academico=c["periodo_academico"]))
+    existentes.add(c["nombre"])
+    log(f"curso creado: {c['nombre']}")
+db.commit()
+
+cursos_por_nombre = {c.nombre: c for c in db.query(Curso).all()}
+
+# --- Inscripciones (sin campo unico natural; se deduplica por par estudiante+curso) ---
+inscripciones_candidatas = [
+    {"estudiante_codigo": "C999", "curso_nombre": "Calculo I", "estado": "activa"},
+    {"estudiante_codigo": "A100", "curso_nombre": "Fisica I", "estado": "activa"},
+    {"estudiante_codigo": "E001", "curso_nombre": "Programacion I", "estado": "activa"},
+    {"estudiante_codigo": "E002", "curso_nombre": "Quimica General", "estado": "cupo_lleno"},
+    {"estudiante_codigo": "E003", "curso_nombre": "Historia Universal", "estado": "cerrada"},
+]
+filas_actuales = db.query(Inscripcion).all()
+pares_existentes = {(i.estudiante_id, i.curso_id) for i in filas_actuales}
+total_actual = len(filas_actuales)
+for c in inscripciones_candidatas:
+    if total_actual >= META:
+        break
+    est = estudiantes_por_codigo.get(c["estudiante_codigo"])
+    cur = cursos_por_nombre.get(c["curso_nombre"])
+    if not est or not cur or (est.id, cur.id) in pares_existentes:
+        continue
+    db.add(Inscripcion(estudiante_id=est.id, curso_id=cur.id, estado=c["estado"]))
+    pares_existentes.add((est.id, cur.id))
+    total_actual += 1
+    log(f"inscripcion creada: {c['estudiante_codigo']} -> {c['curso_nombre']} ({c['estado']})")
+db.commit()
+
+db.close()
+print("Siembra completada.")
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "seed_data.py") -Content $content_seed_data
+    Write-Host "  [OK] seed_data.py generado (ejecutar manualmente: cd backend; python seed_data.py)" -ForegroundColor Green
 
     # Resumen
     if ($skippedFiles.Count -gt 0) {
