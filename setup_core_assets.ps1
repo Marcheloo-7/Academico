@@ -773,6 +773,7 @@ class CursoInput:
 
     $content_gql_schema = @'
 import strawberry
+from strawberry.types import Info
 from typing import Optional, List
 from .types import (
     UsuarioType, DocenteType, EstudianteType,
@@ -782,39 +783,39 @@ from .types import (
 from core.ca005_db.models import Estudiante, Docente, Curso, Inscripcion, Usuario
 from core.ca001_auth.security import create_access_token, verify_password
 
-def get_db_from_info(info):
+def get_db_from_info(info: Info):
     return info.context["db"]
 
 @strawberry.type
 class Query:
     @strawberry.field
-    def estudiantes(self, info, filtro: Optional[str] = None) -> List[EstudianteType]:
+    def estudiantes(self, info: Info, filtro: Optional[str] = None) -> List[EstudianteType]:
         db = get_db_from_info(info)
         q = db.query(Estudiante)
         if filtro: q = q.filter(Estudiante.nombre.ilike(f"%{filtro}%"))
         return q.all()
 
     @strawberry.field
-    def docentes(self, info, filtro: Optional[str] = None) -> List[DocenteType]:
+    def docentes(self, info: Info, filtro: Optional[str] = None) -> List[DocenteType]:
         db = get_db_from_info(info)
         q = db.query(Docente)
         if filtro: q = q.filter(Docente.nombre.ilike(f"%{filtro}%"))
         return q.all()
 
     @strawberry.field
-    def cursos(self, info, filtro: Optional[str] = None) -> List[CursoType]:
+    def cursos(self, info: Info, filtro: Optional[str] = None) -> List[CursoType]:
         db = get_db_from_info(info)
         return db.query(Curso).all()
 
     @strawberry.field
-    def inscripciones(self, info, filtro: Optional[str] = None) -> List[InscripcionType]:
+    def inscripciones(self, info: Info, filtro: Optional[str] = None) -> List[InscripcionType]:
         db = get_db_from_info(info)
         return db.query(Inscripcion).all()
 
 @strawberry.type
 class Mutation:
     @strawberry.mutation
-    def login(self, info, correo: str, contrasena: str) -> AuthPayload:
+    def login(self, info: Info, correo: str, contrasena: str) -> AuthPayload:
         db = get_db_from_info(info)
         usuario = db.query(Usuario).filter(Usuario.correo == correo).first()
         if not usuario or not verify_password(contrasena, usuario.contrasena_hash):
@@ -823,7 +824,7 @@ class Mutation:
         return AuthPayload(token=token, usuario=usuario)
 
     @strawberry.mutation
-    def crear_estudiante(self, info, datos: EstudianteInput) -> EstudianteType:
+    def crear_estudiante(self, info: Info, datos: EstudianteInput) -> EstudianteType:
         db = get_db_from_info(info)
         nuevo = Estudiante(**datos.__dict__)
         db.add(nuevo)
