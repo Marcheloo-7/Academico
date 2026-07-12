@@ -99,7 +99,7 @@ npm install --save @mui/system
 npm install --save @fontsource/fraunces @fontsource/ibm-plex-sans @fontsource/ibm-plex-mono
 
 # Ajustar el titulo del index.html generado por create-vite (el titulo por
-# defecto queda vacio o generico segun el nombre de carpeta usado).
+# defecto queda vacio o generico segun el nombre de carpeta usado)
 $indexHtmlPath = Join-Path $FRONTEND_DIR "index.html"
 (Get-Content $indexHtmlPath -Raw) -replace '<title>.*?</title>', '<title>SGA - Sistema de Gestion Academica</title>' | Set-Content $indexHtmlPath -Encoding UTF8
 
