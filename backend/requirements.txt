@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-jose[cryptography]
+passlib
+bcrypt==3.2.0
+python-multipart
+sqlalchemy
+psycopg2-binary
+asyncpg
+python-dotenv
+email-validator
+strawberry-graphql[fastapi]
+pydantic-settings

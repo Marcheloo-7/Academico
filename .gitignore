@@ -1,0 +1,19 @@
+# Secrets / entornos
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Logs
+*.log

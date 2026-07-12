@@ -1,0 +1,31 @@
+# Plantilla de despliegue continuo. NO es funcional tal cual: requiere
+# configurar los secrets del repositorio (registro de contenedores,
+# credenciales del servidor/orquestador destino) antes de poder desplegar
+# a un ambiente real. Se deja como punto de partida para que cada producto
+# derivado la complete segun su infraestructura (Docker Hub, GHCR, K8s, etc.).
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t academico-backend:${{ github.sha }} ./backend
+
+      - name: Build frontend image
+        run: docker build -t academico-frontend:${{ github.sha }} ./frontend
+
+      # - name: Login al registro de contenedores
+      #   run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login <registry> -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+      # - name: Push de imagenes
+      #   run: |
+      #     docker push <registry>/academico-backend:${{ github.sha }}
+      #     docker push <registry>/academico-frontend:${{ github.sha }}
+      # - name: Deploy a staging/produccion
+      #   run: echo "Agregar aqui el paso de despliegue especifico del ambiente destino"
