@@ -454,7 +454,7 @@ def get_db() -> Generator[Session, None, None]:
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca005_db\session.py") -Content $content_session
 
     $content_models = @'
-from datetime import datetime
+﻿from datetime import datetime
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, CheckConstraint
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -469,6 +469,12 @@ class Usuario(Base):
     creado_en = Column(DateTime, default=datetime.utcnow)
     __table_args__ = (CheckConstraint("rol IN ('docente', 'administrador')", name="ck_usuario_rol"),)
 
+class TokenRevocado(Base):
+    __tablename__ = "tokens_revocados"
+    id = Column(Integer, primary_key=True, index=True)
+    jti = Column(String, unique=True, nullable=False, index=True)
+    revocado_en = Column(DateTime, default=datetime.utcnow)
+
 class Docente(Base):
     __tablename__ = "docentes"
     id = Column(Integer, primary_key=True, index=True)
@@ -476,6 +482,7 @@ class Docente(Base):
     nombre = Column(String, nullable=False)
     correo = Column(String, nullable=False)
     especialidad = Column(String, nullable=True)
+    activo = Column(Boolean, default=True, nullable=False)
     usuario = relationship("Usuario")
     cursos = relationship("Curso", back_populates="docente")
 
@@ -486,6 +493,7 @@ class Estudiante(Base):
     codigo = Column(String, unique=True, nullable=False)
     correo = Column(String, nullable=False)
     datos_contacto = Column(String, nullable=True)
+    activo = Column(Boolean, default=True, nullable=False)
     inscripciones = relationship("Inscripcion", back_populates="estudiante")
 
 class Curso(Base):
@@ -514,25 +522,32 @@ class Inscripcion(Base):
     Write-Host ""
     Write-Host "--- CA-001: Archivos de autenticacion ---" -ForegroundColor Cyan
     $content_auth_schemas = @'
+﻿from typing import Optional
 from pydantic import BaseModel
 class LoginRequest(BaseModel):
+    correo: str
+    contrasena: str
+class RegistroRequest(BaseModel):
     correo: str
     contrasena: str
 class TokenPayload(BaseModel):
     sub: str
     rol: str
     exp: int
+    jti: Optional[str] = None
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca001_auth\schemas.py") -Content $content_auth_schemas
 
     $content_auth_security = @'
-import os
+﻿import os
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
 from .schemas import TokenPayload
 
 load_dotenv()
@@ -552,7 +567,7 @@ def get_password_hash(password):
 def create_access_token(data: dict, rol: str, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire, "rol": rol})
+    to_encode.update({"exp": expire, "rol": rol, "jti": str(uuid.uuid4())})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -566,18 +581,33 @@ def verify_token(token: str) -> TokenPayload:
         return TokenPayload(**payload)
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token invalido")
+
+def es_token_revocado(db: Session, jti: Optional[str]) -> bool:
+    if not jti:
+        return False
+    from core.ca005_db.models import TokenRevocado
+    return db.query(TokenRevocado).filter(TokenRevocado.jti == jti).first() is not None
+
+def revocar_token(db: Session, jti: str) -> None:
+    from core.ca005_db.models import TokenRevocado
+    if not db.query(TokenRevocado).filter(TokenRevocado.jti == jti).first():
+        db.add(TokenRevocado(jti=jti))
+        db.commit()
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca001_auth\security.py") -Content $content_auth_security
 
     $content_auth_router = @'
-from fastapi import APIRouter, Depends, HTTPException, status
+﻿from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-from .schemas import LoginRequest
-from .security import verify_password, create_access_token
+from .schemas import LoginRequest, RegistroRequest
+from .security import verify_password, get_password_hash, create_access_token, verify_token, revocar_token
 from core.ca005_db.session import get_db
 from core.ca005_db.models import Usuario
+from core.ca007_validaciones.validators import es_email_valido, es_password_seguro
 
 router = APIRouter(prefix="/auth", tags=["Autenticacion"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 @router.post("/login")
 def login(datos: LoginRequest, db: Session = Depends(get_db)):
@@ -588,6 +618,31 @@ def login(datos: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Usuario inactivo")
     token = create_access_token(data={"sub": usuario.correo}, rol=usuario.rol)
     return {"token": token, "usuario": {"id": usuario.id, "correo": usuario.correo, "rol": usuario.rol}}
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register(datos: RegistroRequest, db: Session = Depends(get_db)):
+    # Auto-registro publico: el rol siempre queda fijo en "docente". Asignar
+    # "administrador" requiere que otro administrador lo haga luego via
+    # PUT /usuarios/{id}, para no exponer creacion de cuentas admin sin
+    # control desde un endpoint sin autenticacion previa.
+    if not es_email_valido(datos.correo):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Correo invalido")
+    if not es_password_seguro(datos.contrasena):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="La contrasena no cumple los requisitos de seguridad")
+    if db.query(Usuario).filter(Usuario.correo == datos.correo).first():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El correo ya esta registrado")
+    nuevo = Usuario(correo=datos.correo, contrasena_hash=get_password_hash(datos.contrasena), rol="docente")
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return {"id": nuevo.id, "correo": nuevo.correo, "rol": nuevo.rol}
+
+@router.post("/logout")
+def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = verify_token(token)
+    if payload.jti:
+        revocar_token(db, payload.jti)
+    return {"mensaje": "Sesion cerrada"}
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca001_auth\router.py") -Content $content_auth_router
 
@@ -595,7 +650,7 @@ def login(datos: LoginRequest, db: Session = Depends(get_db)):
     Write-Host ""
     Write-Host "--- CA-002: Archivos de gestion de usuarios ---" -ForegroundColor Cyan
     $content_usr_schemas = @'
-from typing import Optional
+﻿from typing import Optional
 from pydantic import BaseModel
 
 class UsuarioCreate(BaseModel):
@@ -611,6 +666,11 @@ class UsuarioResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class UsuarioUpdate(BaseModel):
+    correo: Optional[str] = None
+    rol: Optional[str] = None
+    activo: Optional[bool] = None
+
 class EstudianteCreate(BaseModel):
     nombre: str
     codigo: str
@@ -619,8 +679,15 @@ class EstudianteCreate(BaseModel):
 
 class EstudianteResponse(EstudianteCreate):
     id: int
+    activo: bool
     class Config:
         from_attributes = True
+
+class EstudianteUpdate(BaseModel):
+    nombre: Optional[str] = None
+    codigo: Optional[str] = None
+    correo: Optional[str] = None
+    datos_contacto: Optional[str] = None
 
 class DocenteCreate(BaseModel):
     nombre: str
@@ -630,17 +697,29 @@ class DocenteCreate(BaseModel):
 
 class DocenteResponse(DocenteCreate):
     id: int
+    activo: bool
     class Config:
         from_attributes = True
+
+class DocenteUpdate(BaseModel):
+    nombre: Optional[str] = None
+    correo: Optional[str] = None
+    especialidad: Optional[str] = None
+    usuario_id: Optional[int] = None
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\schemas.py") -Content $content_usr_schemas
 
     $content_usr_services = @'
-from typing import Optional
+﻿from typing import Optional
 from sqlalchemy.orm import Session
-from .schemas import UsuarioCreate, EstudianteCreate, DocenteCreate
+from .schemas import (
+    UsuarioCreate, UsuarioUpdate,
+    EstudianteCreate, EstudianteUpdate,
+    DocenteCreate, DocenteUpdate,
+)
 from core.ca005_db.models import Usuario, Estudiante, Docente
 from core.ca001_auth.security import get_password_hash
+from core.ca008_errores.exceptions import RecursoNoEncontradoException
 
 def crear_usuario(db: Session, datos: UsuarioCreate):
     nuevo_usuario = Usuario(
@@ -653,8 +732,32 @@ def crear_usuario(db: Session, datos: UsuarioCreate):
     db.refresh(nuevo_usuario)
     return nuevo_usuario
 
-def listar_usuarios(db: Session):
-    return db.query(Usuario).all()
+def listar_usuarios(db: Session, filtro: Optional[str] = None, offset: int = 0, limite: int = 50):
+    query = db.query(Usuario)
+    if filtro:
+        query = query.filter(Usuario.correo.ilike(f"%{filtro}%"))
+    return query.order_by(Usuario.id).offset(offset).limit(limite).all()
+
+def obtener_usuario(db: Session, usuario_id: int) -> Usuario:
+    usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
+    if not usuario:
+        raise RecursoNoEncontradoException("Usuario no encontrado")
+    return usuario
+
+def actualizar_usuario(db: Session, usuario_id: int, datos: UsuarioUpdate):
+    usuario = obtener_usuario(db, usuario_id)
+    for campo, valor in datos.dict(exclude_unset=True).items():
+        setattr(usuario, campo, valor)
+    db.commit()
+    db.refresh(usuario)
+    return usuario
+
+def eliminar_usuario(db: Session, usuario_id: int):
+    usuario = obtener_usuario(db, usuario_id)
+    usuario.activo = False
+    db.commit()
+    db.refresh(usuario)
+    return usuario
 
 def crear_estudiante(db: Session, datos: EstudianteCreate):
     nuevo = Estudiante(**datos.dict())
@@ -663,11 +766,32 @@ def crear_estudiante(db: Session, datos: EstudianteCreate):
     db.refresh(nuevo)
     return nuevo
 
-def listar_estudiantes(db: Session, filtro: Optional[str] = None):
-    query = db.query(Estudiante)
+def listar_estudiantes(db: Session, filtro: Optional[str] = None, offset: int = 0, limite: int = 50):
+    query = db.query(Estudiante).filter(Estudiante.activo == True)  # noqa: E712
     if filtro:
         query = query.filter(Estudiante.nombre.ilike(f"%{filtro}%"))
-    return query.all()
+    return query.order_by(Estudiante.id).offset(offset).limit(limite).all()
+
+def obtener_estudiante(db: Session, estudiante_id: int) -> Estudiante:
+    estudiante = db.query(Estudiante).filter(Estudiante.id == estudiante_id).first()
+    if not estudiante:
+        raise RecursoNoEncontradoException("Estudiante no encontrado")
+    return estudiante
+
+def actualizar_estudiante(db: Session, estudiante_id: int, datos: EstudianteUpdate):
+    estudiante = obtener_estudiante(db, estudiante_id)
+    for campo, valor in datos.dict(exclude_unset=True).items():
+        setattr(estudiante, campo, valor)
+    db.commit()
+    db.refresh(estudiante)
+    return estudiante
+
+def eliminar_estudiante(db: Session, estudiante_id: int):
+    estudiante = obtener_estudiante(db, estudiante_id)
+    estudiante.activo = False
+    db.commit()
+    db.refresh(estudiante)
+    return estudiante
 
 def crear_docente(db: Session, datos: DocenteCreate):
     nuevo = Docente(**datos.dict())
@@ -676,16 +800,37 @@ def crear_docente(db: Session, datos: DocenteCreate):
     db.refresh(nuevo)
     return nuevo
 
-def listar_docentes(db: Session, filtro: Optional[str] = None):
-    query = db.query(Docente)
+def listar_docentes(db: Session, filtro: Optional[str] = None, offset: int = 0, limite: int = 50):
+    query = db.query(Docente).filter(Docente.activo == True)  # noqa: E712
     if filtro:
         query = query.filter(Docente.nombre.ilike(f"%{filtro}%"))
-    return query.all()
+    return query.order_by(Docente.id).offset(offset).limit(limite).all()
+
+def obtener_docente(db: Session, docente_id: int) -> Docente:
+    docente = db.query(Docente).filter(Docente.id == docente_id).first()
+    if not docente:
+        raise RecursoNoEncontradoException("Docente no encontrado")
+    return docente
+
+def actualizar_docente(db: Session, docente_id: int, datos: DocenteUpdate):
+    docente = obtener_docente(db, docente_id)
+    for campo, valor in datos.dict(exclude_unset=True).items():
+        setattr(docente, campo, valor)
+    db.commit()
+    db.refresh(docente)
+    return docente
+
+def eliminar_docente(db: Session, docente_id: int):
+    docente = obtener_docente(db, docente_id)
+    docente.activo = False
+    db.commit()
+    db.refresh(docente)
+    return docente
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\services.py") -Content $content_usr_services
 
     $content_usr_router = @'
-from fastapi import APIRouter, Depends
+﻿from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from typing import List
 from . import schemas, services
@@ -696,8 +841,8 @@ from core.ca009_auditoria.services import registrar_auditoria
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
 
 @router.get("/", response_model=List[schemas.UsuarioResponse])
-def listar_usuarios(db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
-    return services.listar_usuarios(db)
+def listar_usuarios(filtro: str = None, offset: int = 0, limite: int = 50, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    return services.listar_usuarios(db, filtro, offset, limite)
 
 @router.post("/", response_model=schemas.UsuarioResponse)
 def crear_usuario(datos: schemas.UsuarioCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
@@ -705,9 +850,21 @@ def crear_usuario(datos: schemas.UsuarioCreate, db: Session = Depends(get_db), t
     registrar_auditoria(db, usuario=token.sub, recurso="usuario", accion="crear", valores_nuevos={"correo": nuevo.correo, "rol": nuevo.rol})
     return nuevo
 
+@router.put("/{usuario_id}", response_model=schemas.UsuarioResponse)
+def actualizar_usuario(usuario_id: int, datos: schemas.UsuarioUpdate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    actualizado = services.actualizar_usuario(db, usuario_id, datos)
+    registrar_auditoria(db, usuario=token.sub, recurso="usuario", accion="actualizar", valores_nuevos=datos.dict(exclude_unset=True))
+    return actualizado
+
+@router.delete("/{usuario_id}", response_model=schemas.UsuarioResponse)
+def eliminar_usuario(usuario_id: int, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    eliminado = services.eliminar_usuario(db, usuario_id)
+    registrar_auditoria(db, usuario=token.sub, recurso="usuario", accion="eliminar", valores_nuevos={"id": eliminado.id, "activo": eliminado.activo})
+    return eliminado
+
 @router.get("/estudiantes", response_model=List[schemas.EstudianteResponse])
-def listar_estudiantes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
-    return services.listar_estudiantes(db, filtro)
+def listar_estudiantes(filtro: str = None, offset: int = 0, limite: int = 50, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
+    return services.listar_estudiantes(db, filtro, offset, limite)
 
 @router.post("/estudiantes", response_model=schemas.EstudianteResponse)
 def crear_estudiante(datos: schemas.EstudianteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
@@ -715,15 +872,39 @@ def crear_estudiante(datos: schemas.EstudianteCreate, db: Session = Depends(get_
     registrar_auditoria(db, usuario=token.sub, recurso="estudiante", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "codigo": nuevo.codigo})
     return nuevo
 
+@router.put("/estudiantes/{estudiante_id}", response_model=schemas.EstudianteResponse)
+def actualizar_estudiante(estudiante_id: int, datos: schemas.EstudianteUpdate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    actualizado = services.actualizar_estudiante(db, estudiante_id, datos)
+    registrar_auditoria(db, usuario=token.sub, recurso="estudiante", accion="actualizar", valores_nuevos=datos.dict(exclude_unset=True))
+    return actualizado
+
+@router.delete("/estudiantes/{estudiante_id}", response_model=schemas.EstudianteResponse)
+def eliminar_estudiante(estudiante_id: int, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    eliminado = services.eliminar_estudiante(db, estudiante_id)
+    registrar_auditoria(db, usuario=token.sub, recurso="estudiante", accion="eliminar", valores_nuevos={"id": eliminado.id, "activo": eliminado.activo})
+    return eliminado
+
 @router.get("/docentes", response_model=List[schemas.DocenteResponse])
-def listar_docentes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
-    return services.listar_docentes(db, filtro)
+def listar_docentes(filtro: str = None, offset: int = 0, limite: int = 50, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
+    return services.listar_docentes(db, filtro, offset, limite)
 
 @router.post("/docentes", response_model=schemas.DocenteResponse)
 def crear_docente(datos: schemas.DocenteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
     nuevo = services.crear_docente(db, datos)
     registrar_auditoria(db, usuario=token.sub, recurso="docente", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "correo": nuevo.correo})
     return nuevo
+
+@router.put("/docentes/{docente_id}", response_model=schemas.DocenteResponse)
+def actualizar_docente(docente_id: int, datos: schemas.DocenteUpdate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    actualizado = services.actualizar_docente(db, docente_id, datos)
+    registrar_auditoria(db, usuario=token.sub, recurso="docente", accion="actualizar", valores_nuevos=datos.dict(exclude_unset=True))
+    return actualizado
+
+@router.delete("/docentes/{docente_id}", response_model=schemas.DocenteResponse)
+def eliminar_docente(docente_id: int, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+    eliminado = services.eliminar_docente(db, docente_id)
+    registrar_auditoria(db, usuario=token.sub, recurso="docente", accion="eliminar", valores_nuevos={"id": eliminado.id, "activo": eliminado.activo})
+    return eliminado
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\router.py") -Content $content_usr_router
 
@@ -731,7 +912,7 @@ def crear_docente(datos: schemas.DocenteCreate, db: Session = Depends(get_db), t
     Write-Host ""
     Write-Host "--- CA-003: Archivos de roles y permisos ---" -ForegroundColor Cyan
     $content_roles_perms = @'
-PERMISOS = {
+﻿PERMISOS = {
     "administrador": ["*"],
     "docente": ["leer_estudiantes", "leer_cursos", "actualizar_cursos", "leer_inscripciones"]
 }
@@ -740,18 +921,27 @@ def verificar_permiso(rol: str, accion: str) -> bool:
     if rol not in PERMISOS: return False
     if "*" in PERMISOS[rol]: return True
     return accion in PERMISOS[rol]
+
+def listar_roles() -> list[dict]:
+    return [{"rol": rol, "permisos": permisos} for rol, permisos in PERMISOS.items()]
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca003_roles\permissions.py") -Content $content_roles_perms
 
     $content_roles_deps = @'
-from fastapi import Depends, HTTPException, status
+﻿from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from core.ca001_auth.security import verify_token
+from sqlalchemy.orm import Session
+from core.ca001_auth.security import verify_token, es_token_revocado
+from core.ca005_db.session import get_db
+from .permissions import verificar_permiso
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    return verify_token(token)
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = verify_token(token)
+    if es_token_revocado(db, payload.jti):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revocado")
+    return payload
 
 def requiere_rol(*roles: str):
     def verificador(token_payload = Depends(get_current_user)):
@@ -759,14 +949,34 @@ def requiere_rol(*roles: str):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tiene permisos para esta accion")
         return token_payload
     return verificador
+
+def requiere_permiso(accion: str):
+    def verificador(token_payload = Depends(get_current_user)):
+        if not verificar_permiso(token_payload.rol, accion):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tiene permiso para esta accion")
+        return token_payload
+    return verificador
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca003_roles\dependencies.py") -Content $content_roles_deps
+
+    $content_roles_router = @'
+from fastapi import APIRouter, Depends
+from .dependencies import requiere_rol
+from .permissions import listar_roles
+
+router = APIRouter(prefix="/roles", tags=["Roles"])
+
+@router.get("/")
+def obtener_roles(token = Depends(requiere_rol("administrador"))):
+    return listar_roles()
+'@
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca003_roles\router.py") -Content $content_roles_router
 
     # CA-006 - GraphQL
     Write-Host ""
     Write-Host "--- CA-006: Archivos de GraphQL ---" -ForegroundColor Cyan
     $content_gql_types = @'
-import strawberry
+﻿import strawberry
 from typing import Optional
 
 @strawberry.type
@@ -834,6 +1044,29 @@ class InscripcionInput:
     estudiante_id: int
     curso_id: int
     estado: str = "activa"
+
+@strawberry.input
+class EstudianteUpdateInput:
+    nombre: Optional[str] = None
+    codigo: Optional[str] = None
+    correo: Optional[str] = None
+    datos_contacto: Optional[str] = None
+
+@strawberry.input
+class DocenteUpdateInput:
+    nombre: Optional[str] = None
+    correo: Optional[str] = None
+    especialidad: Optional[str] = None
+
+@strawberry.input
+class CursoUpdateInput:
+    nombre: Optional[str] = None
+    docente_id: Optional[int] = None
+    periodo_academico: Optional[str] = None
+
+@strawberry.input
+class InscripcionUpdateInput:
+    estado: Optional[str] = None
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\types.py") -Content $content_gql_types
 
@@ -842,64 +1075,92 @@ import strawberry
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types import Info
 from typing import Optional, List
-from core.ca008_errores.graphql_errors import AcademicoSchema
+from core.ca008_errores.graphql_errors import (
+    AcademicoSchema,
+    NoAutorizadoGraphQLError,
+    PermisoDenegadoGraphQLError,
+    RecursoNoEncontradoGraphQLError,
+)
 from .types import (
     UsuarioType, DocenteType, EstudianteType,
     CursoType, InscripcionType, AuthPayload,
     EstudianteInput, DocenteInput, CursoInput, InscripcionInput,
+    EstudianteUpdateInput, DocenteUpdateInput, CursoUpdateInput, InscripcionUpdateInput,
 )
 from core.ca005_db.models import Estudiante, Docente, Curso, Inscripcion, Usuario
-from core.ca001_auth.security import create_access_token, verify_password, verify_token
+from core.ca001_auth.security import create_access_token, verify_password, verify_token, es_token_revocado, revocar_token
+from core.ca003_roles.permissions import verificar_permiso
 from core.ca009_auditoria.services import registrar_auditoria
 
 def get_db_from_info(info: Info):
     return info.context["db"]
 
-def get_usuario_actual(info: Info, *roles: str):
+def get_usuario_actual(info: Info, *roles: str, accion: Optional[str] = None):
     # No existe middleware global de autenticacion para GraphQL (a diferencia
     # de REST, que usa requiere_rol de core.ca003_roles.dependencies); cada
     # query/mutation que necesita proteger acceso o saber "quien" actua
     # (para auditoria) llama a este helper, que valida el Authorization
     # header manualmente y opcionalmente exige uno de los roles indicados.
+    # "accion" permite, ademas del chequeo de rol, exigir un permiso
+    # granular de CA-003 (core.ca003_roles.permissions.PERMISOS).
     request = info.context.get("request")
     auth_header = request.headers.get("authorization") if request else None
     if not auth_header or not auth_header.lower().startswith("bearer "):
-        raise Exception("No autorizado")
+        raise NoAutorizadoGraphQLError()
     token = auth_header.split(" ", 1)[1]
     usuario = verify_token(token)
+    if es_token_revocado(get_db_from_info(info), usuario.jti):
+        raise NoAutorizadoGraphQLError("Token revocado")
     if roles and usuario.rol not in roles:
-        raise Exception("Permiso denegado")
+        raise PermisoDenegadoGraphQLError()
+    if accion and not verificar_permiso(usuario.rol, accion):
+        raise PermisoDenegadoGraphQLError()
     return usuario
+
+def obtener_o_404(db, modelo, id: int, mensaje: str):
+    instancia = db.query(modelo).filter(modelo.id == id).first()
+    if not instancia:
+        raise RecursoNoEncontradoGraphQLError(mensaje)
+    return instancia
+
+def aplicar_cambios(instancia, datos):
+    for campo, valor in datos.__dict__.items():
+        if valor is not None:
+            setattr(instancia, campo, valor)
+    return instancia
 
 @strawberry.type
 class Query:
     @strawberry.field
-    def estudiantes(self, info: Info, filtro: Optional[str] = None) -> List[EstudianteType]:
+    def estudiantes(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limite: int = 50) -> List[EstudianteType]:
         get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
-        q = db.query(Estudiante)
+        q = db.query(Estudiante).filter(Estudiante.activo == True)  # noqa: E712
         if filtro: q = q.filter(Estudiante.nombre.ilike(f"%{filtro}%"))
-        return q.all()
+        return q.order_by(Estudiante.id).offset(offset).limit(limite).all()
 
     @strawberry.field
-    def docentes(self, info: Info, filtro: Optional[str] = None) -> List[DocenteType]:
+    def docentes(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limite: int = 50) -> List[DocenteType]:
         get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
-        q = db.query(Docente)
+        q = db.query(Docente).filter(Docente.activo == True)  # noqa: E712
         if filtro: q = q.filter(Docente.nombre.ilike(f"%{filtro}%"))
-        return q.all()
+        return q.order_by(Docente.id).offset(offset).limit(limite).all()
 
     @strawberry.field
-    def cursos(self, info: Info, filtro: Optional[str] = None) -> List[CursoType]:
+    def cursos(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limite: int = 50) -> List[CursoType]:
         get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
-        return db.query(Curso).all()
+        q = db.query(Curso)
+        if filtro: q = q.filter(Curso.nombre.ilike(f"%{filtro}%"))
+        return q.order_by(Curso.id).offset(offset).limit(limite).all()
 
     @strawberry.field
-    def inscripciones(self, info: Info, filtro: Optional[str] = None) -> List[InscripcionType]:
+    def inscripciones(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limite: int = 50) -> List[InscripcionType]:
         get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
-        return db.query(Inscripcion).all()
+        q = db.query(Inscripcion)
+        return q.order_by(Inscripcion.id).offset(offset).limit(limite).all()
 
 @strawberry.type
 class Mutation:
@@ -908,9 +1169,17 @@ class Mutation:
         db = get_db_from_info(info)
         usuario = db.query(Usuario).filter(Usuario.correo == correo).first()
         if not usuario or not verify_password(contrasena, usuario.contrasena_hash):
-            raise Exception("Credenciales invalidas")
+            raise NoAutorizadoGraphQLError("Credenciales invalidas")
         token = create_access_token(data={"sub": usuario.correo}, rol=usuario.rol)
         return AuthPayload(token=token, usuario=usuario)
+
+    @strawberry.mutation
+    def logout(self, info: Info) -> bool:
+        usuario = get_usuario_actual(info)
+        db = get_db_from_info(info)
+        if usuario.jti:
+            revocar_token(db, usuario.jti)
+        return True
 
     @strawberry.mutation
     def crear_estudiante(self, info: Info, datos: EstudianteInput) -> EstudianteType:
@@ -924,6 +1193,61 @@ class Mutation:
         return nuevo
 
     @strawberry.mutation
+    def actualizar_estudiante(self, info: Info, id: int, datos: EstudianteUpdateInput) -> EstudianteType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        estudiante = obtener_o_404(db, Estudiante, id, "Estudiante no encontrado")
+        aplicar_cambios(estudiante, datos)
+        db.commit()
+        db.refresh(estudiante)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="estudiante", accion="actualizar", valores_nuevos={k: v for k, v in datos.__dict__.items() if v is not None})
+        return estudiante
+
+    @strawberry.mutation
+    def eliminar_estudiante(self, info: Info, id: int) -> EstudianteType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        estudiante = obtener_o_404(db, Estudiante, id, "Estudiante no encontrado")
+        estudiante.activo = False
+        db.commit()
+        db.refresh(estudiante)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="estudiante", accion="eliminar", valores_nuevos={"id": id, "activo": False})
+        return estudiante
+
+    @strawberry.mutation
+    def crear_docente(self, info: Info, datos: DocenteInput) -> DocenteType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        nuevo = Docente(**datos.__dict__)
+        db.add(nuevo)
+        db.commit()
+        db.refresh(nuevo)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="docente", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "correo": nuevo.correo})
+        return nuevo
+
+    @strawberry.mutation
+    def actualizar_docente(self, info: Info, id: int, datos: DocenteUpdateInput) -> DocenteType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        docente = obtener_o_404(db, Docente, id, "Docente no encontrado")
+        aplicar_cambios(docente, datos)
+        db.commit()
+        db.refresh(docente)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="docente", accion="actualizar", valores_nuevos={k: v for k, v in datos.__dict__.items() if v is not None})
+        return docente
+
+    @strawberry.mutation
+    def eliminar_docente(self, info: Info, id: int) -> DocenteType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        docente = obtener_o_404(db, Docente, id, "Docente no encontrado")
+        docente.activo = False
+        db.commit()
+        db.refresh(docente)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="docente", accion="eliminar", valores_nuevos={"id": id, "activo": False})
+        return docente
+
+    @strawberry.mutation
     def crear_curso(self, info: Info, datos: CursoInput) -> CursoType:
         usuario = get_usuario_actual(info, "administrador")
         db = get_db_from_info(info)
@@ -935,6 +1259,30 @@ class Mutation:
         return nuevo
 
     @strawberry.mutation
+    def actualizar_curso(self, info: Info, id: int, datos: CursoUpdateInput) -> CursoType:
+        # Unico punto del dominio que exige el permiso granular "actualizar_cursos"
+        # de CA-003 en vez de solo el rol: administrador tiene "*" y pasa siempre;
+        # docente solo pasa porque ese permiso especifico esta en su lista.
+        usuario = get_usuario_actual(info, "administrador", "docente", accion="actualizar_cursos")
+        db = get_db_from_info(info)
+        curso = obtener_o_404(db, Curso, id, "Curso no encontrado")
+        aplicar_cambios(curso, datos)
+        db.commit()
+        db.refresh(curso)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="curso", accion="actualizar", valores_nuevos={k: v for k, v in datos.__dict__.items() if v is not None})
+        return curso
+
+    @strawberry.mutation
+    def eliminar_curso(self, info: Info, id: int) -> CursoType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        curso = obtener_o_404(db, Curso, id, "Curso no encontrado")
+        db.delete(curso)
+        db.commit()
+        registrar_auditoria(db, usuario=usuario.sub, recurso="curso", accion="eliminar", valores_nuevos={"id": id})
+        return curso
+
+    @strawberry.mutation
     def crear_inscripcion(self, info: Info, datos: InscripcionInput) -> InscripcionType:
         usuario = get_usuario_actual(info, "administrador", "docente")
         db = get_db_from_info(info)
@@ -944,6 +1292,27 @@ class Mutation:
         db.refresh(nueva)
         registrar_auditoria(db, usuario=usuario.sub, recurso="inscripcion", accion="crear", valores_nuevos={"estudiante_id": nueva.estudiante_id, "curso_id": nueva.curso_id, "estado": nueva.estado})
         return nueva
+
+    @strawberry.mutation
+    def actualizar_inscripcion(self, info: Info, id: int, datos: InscripcionUpdateInput) -> InscripcionType:
+        usuario = get_usuario_actual(info, "administrador", "docente")
+        db = get_db_from_info(info)
+        inscripcion = obtener_o_404(db, Inscripcion, id, "Inscripcion no encontrada")
+        aplicar_cambios(inscripcion, datos)
+        db.commit()
+        db.refresh(inscripcion)
+        registrar_auditoria(db, usuario=usuario.sub, recurso="inscripcion", accion="actualizar", valores_nuevos={k: v for k, v in datos.__dict__.items() if v is not None})
+        return inscripcion
+
+    @strawberry.mutation
+    def eliminar_inscripcion(self, info: Info, id: int) -> InscripcionType:
+        usuario = get_usuario_actual(info, "administrador")
+        db = get_db_from_info(info)
+        inscripcion = obtener_o_404(db, Inscripcion, id, "Inscripcion no encontrada")
+        db.delete(inscripcion)
+        db.commit()
+        registrar_auditoria(db, usuario=usuario.sub, recurso="inscripcion", accion="eliminar", valores_nuevos={"id": id})
+        return inscripcion
 
 schema = AcademicoSchema(query=Query, mutation=Mutation, config=StrawberryConfig(auto_camel_case=False))
 '@
@@ -1103,10 +1472,38 @@ export function useFormValidation(initialValues, rules) {
     return Object.keys(nuevosErrores).length === 0;
   };
 
-  return { values, errors, handleChange, validateAll };
+  return { values, errors, handleChange, validateAll, setValues };
 }
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\utils\useFormValidation.js") -Content $content_fe_useformvalidation
+
+    $content_fe_apiclient = @'
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+async function apiFetch(path, options = {}) {
+  const token = localStorage.getItem("token");
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${API_URL}${path}`, { ...options, headers });
+  if (!res.ok) {
+    let mensaje = `Error ${res.status}`;
+    try {
+      const body = await res.json();
+      mensaje = body.mensaje || body.detail || mensaje;
+    } catch {
+      // respuesta sin cuerpo JSON (ej. error de red)
+    }
+    throw new Error(mensaje);
+  }
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) return res.json();
+  return res;
+}
+
+export { apiFetch, API_URL };
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\utils\apiClient.js") -Content $content_fe_apiclient
 
     # CA-008 - Manejo Centralizado de Errores
     Write-Host ""
@@ -1220,8 +1617,32 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
     $content_err_graphql = @'
 import strawberry
+from graphql import GraphQLError
 
 from .logging_config import logger
+
+
+class ErrorAcademico(GraphQLError):
+    # Version GraphQL del formato de ErrorResponse (codigo/mensaje/tipo) que
+    # usan los exception handlers REST, expuesta via "extensions" ya que
+    # GraphQL no tiene un canal de respuesta de error separado del body.
+    def __init__(self, mensaje: str, codigo: str = "error_aplicacion", tipo: str = "aplicacion"):
+        super().__init__(mensaje, extensions={"codigo": codigo, "tipo": tipo})
+
+
+class NoAutorizadoGraphQLError(ErrorAcademico):
+    def __init__(self, mensaje: str = "No autorizado"):
+        super().__init__(mensaje, codigo="no_autorizado", tipo="autenticacion")
+
+
+class PermisoDenegadoGraphQLError(ErrorAcademico):
+    def __init__(self, mensaje: str = "Permiso denegado"):
+        super().__init__(mensaje, codigo="permiso_denegado", tipo="autorizacion")
+
+
+class RecursoNoEncontradoGraphQLError(ErrorAcademico):
+    def __init__(self, mensaje: str = "Recurso no encontrado"):
+        super().__init__(mensaje, codigo="recurso_no_encontrado", tipo="no_encontrado")
 
 
 class AcademicoSchema(strawberry.Schema):
@@ -1304,6 +1725,9 @@ class AuditLogResponse(BaseModel):
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca009_auditoria\schemas.py") -Content $content_audit_schemas
 
     $content_audit_services = @'
+import csv
+import io
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from sqlalchemy.orm import Session
 from .models import AuditLog
@@ -1342,17 +1766,47 @@ def listar_auditoria(
     if usuario_correo:
         query = query.filter(AuditLog.usuario_correo == usuario_correo)
     return query.order_by(AuditLog.timestamp.desc()).limit(limite).all()
+
+
+def purgar_auditoria_antigua(db: Session, dias: int) -> int:
+    limite = datetime.utcnow() - timedelta(days=dias)
+    eliminados = db.query(AuditLog).filter(AuditLog.timestamp < limite).delete(synchronize_session=False)
+    db.commit()
+    return eliminados
+
+
+def exportar_auditoria_csv(
+    db: Session,
+    recurso: Optional[str] = None,
+    usuario_correo: Optional[str] = None,
+) -> str:
+    query = db.query(AuditLog)
+    if recurso:
+        query = query.filter(AuditLog.recurso == recurso)
+    if usuario_correo:
+        query = query.filter(AuditLog.usuario_correo == usuario_correo)
+    registros = query.order_by(AuditLog.timestamp.desc()).all()
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["id", "usuario_correo", "recurso", "accion", "valores_anteriores", "valores_nuevos", "timestamp"])
+    for r in registros:
+        writer.writerow([r.id, r.usuario_correo, r.recurso, r.accion, r.valores_anteriores, r.valores_nuevos, r.timestamp.isoformat()])
+    return buffer.getvalue()
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca009_auditoria\services.py") -Content $content_audit_services
 
     $content_audit_router = @'
+import io
 from typing import List, Optional
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from . import schemas, services
 from core.ca005_db.session import get_db
 from core.ca003_roles.dependencies import requiere_rol
+from core.ca010_config.settings import settings
 
 router = APIRouter(prefix="/auditoria", tags=["Auditoria"])
 
@@ -1366,6 +1820,32 @@ def listar_auditoria(
     token=Depends(requiere_rol("administrador")),
 ):
     return services.listar_auditoria(db, recurso, usuario_correo, limite)
+
+
+@router.get("/exportar")
+def exportar_auditoria(
+    recurso: Optional[str] = None,
+    usuario_correo: Optional[str] = None,
+    db: Session = Depends(get_db),
+    token=Depends(requiere_rol("administrador")),
+):
+    contenido = services.exportar_auditoria_csv(db, recurso, usuario_correo)
+    return StreamingResponse(
+        io.StringIO(contenido),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=auditoria.csv"},
+    )
+
+
+@router.post("/purgar")
+def purgar_auditoria(
+    dias: Optional[int] = None,
+    db: Session = Depends(get_db),
+    token=Depends(requiere_rol("administrador")),
+):
+    periodo = dias if dias is not None else settings.audit_retention_days
+    eliminados = services.purgar_auditoria_antigua(db, periodo)
+    return {"eliminados": eliminados, "dias_retencion": periodo}
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca009_auditoria\router.py") -Content $content_audit_router
 
@@ -1391,6 +1871,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     environment: str = "development"
     log_level: str = "INFO"
+    audit_retention_days: int = 365
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -1683,7 +2164,7 @@ export default [
     Write-Host ""
     Write-Host "--- main.py: Punto de entrada ---" -ForegroundColor Cyan
     $content_main = @'
-from fastapi import FastAPI, Request
+﻿from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -1692,6 +2173,7 @@ from sqlalchemy.orm import Session
 
 from core.ca001_auth.router import router as auth_router
 from core.ca002_usuarios.router import router as usuarios_router
+from core.ca003_roles.router import router as roles_router
 from core.ca009_auditoria.router import router as auditoria_router
 from core.ca006_graphql.schema import schema
 from core.ca005_db.database import engine, Base, SessionLocal
@@ -1759,6 +2241,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(usuarios_router)
+app.include_router(roles_router)
 app.include_router(auditoria_router)
 app.include_router(graphql_app, prefix="/graphql")
 
@@ -1824,8 +2307,106 @@ export const LOGIN_MUTATION = gql`
   }
 `;
 
+export const LOGOUT_MUTATION = gql`
+  mutation Logout {
+    logout
+  }
+`;
+
+// --- Estudiantes ---
+
 export const GET_ESTUDIANTES = gql`
-  query GetEstudiantes { estudiantes { id nombre codigo correo } }
+  query GetEstudiantes { estudiantes(limite: 200) { id nombre codigo correo datos_contacto } }
+`;
+
+export const CREAR_ESTUDIANTE = gql`
+  mutation CrearEstudiante($datos: EstudianteInput!) {
+    crear_estudiante(datos: $datos) { id nombre codigo correo datos_contacto }
+  }
+`;
+
+export const ACTUALIZAR_ESTUDIANTE = gql`
+  mutation ActualizarEstudiante($id: Int!, $datos: EstudianteUpdateInput!) {
+    actualizar_estudiante(id: $id, datos: $datos) { id nombre codigo correo datos_contacto }
+  }
+`;
+
+export const ELIMINAR_ESTUDIANTE = gql`
+  mutation EliminarEstudiante($id: Int!) {
+    eliminar_estudiante(id: $id) { id }
+  }
+`;
+
+// --- Docentes ---
+
+export const GET_DOCENTES = gql`
+  query GetDocentes { docentes(limite: 200) { id nombre correo especialidad } }
+`;
+
+export const CREAR_DOCENTE = gql`
+  mutation CrearDocente($datos: DocenteInput!) {
+    crear_docente(datos: $datos) { id nombre correo especialidad }
+  }
+`;
+
+export const ACTUALIZAR_DOCENTE = gql`
+  mutation ActualizarDocente($id: Int!, $datos: DocenteUpdateInput!) {
+    actualizar_docente(id: $id, datos: $datos) { id nombre correo especialidad }
+  }
+`;
+
+export const ELIMINAR_DOCENTE = gql`
+  mutation EliminarDocente($id: Int!) {
+    eliminar_docente(id: $id) { id }
+  }
+`;
+
+// --- Cursos ---
+
+export const GET_CURSOS = gql`
+  query GetCursos { cursos(limite: 200) { id nombre docente_id periodo_academico } }
+`;
+
+export const CREAR_CURSO = gql`
+  mutation CrearCurso($datos: CursoInput!) {
+    crear_curso(datos: $datos) { id nombre docente_id periodo_academico }
+  }
+`;
+
+export const ACTUALIZAR_CURSO = gql`
+  mutation ActualizarCurso($id: Int!, $datos: CursoUpdateInput!) {
+    actualizar_curso(id: $id, datos: $datos) { id nombre docente_id periodo_academico }
+  }
+`;
+
+export const ELIMINAR_CURSO = gql`
+  mutation EliminarCurso($id: Int!) {
+    eliminar_curso(id: $id) { id }
+  }
+`;
+
+// --- Inscripciones ---
+
+export const GET_INSCRIPCIONES = gql`
+  query GetInscripciones { inscripciones(limite: 200) { id estudiante_id curso_id estado } }
+`;
+
+export const CREAR_INSCRIPCION = gql`
+  mutation CrearInscripcion($datos: InscripcionInput!) {
+    crear_inscripcion(datos: $datos) { id estudiante_id curso_id estado }
+  }
+`;
+
+export const ACTUALIZAR_INSCRIPCION = gql`
+  mutation ActualizarInscripcion($id: Int!, $datos: InscripcionUpdateInput!) {
+    actualizar_inscripcion(id: $id, datos: $datos) { id estudiante_id curso_id estado }
+  }
+`;
+
+export const ELIMINAR_INSCRIPCION = gql`
+  mutation EliminarInscripcion($id: Int!) {
+    eliminar_inscripcion(id: $id) { id }
+  }
 `;
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\graphql\operations.js") -Content $content_fe_ops
@@ -1978,7 +2559,7 @@ import { academic } from "../../theme";
 export default function PageHeader({ eyebrow, title, action }) {
   return (
     <Box sx={{ mb: 4 }}>
-      <Box sx={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", flexWrap: "wrap", gap: 2 }}>
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 2 }}>
         <Box>
           {eyebrow && (
             <Typography
@@ -2040,8 +2621,33 @@ export default function StatusStamp({ estado }) {
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\StatusStamp.jsx") -Content $content_fe_statusstamp
 
+    $content_fe_confirmdialog = @'
+import { Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button } from "@mui/material";
+import { academic } from "../../theme";
+
+export default function ConfirmDialog({ open, title, message, onConfirm, onCancel, confirmLabel = "Eliminar" }) {
+  return (
+    <Dialog open={open} onClose={onCancel} maxWidth="xs" fullWidth>
+      <DialogTitle>{title}</DialogTitle>
+      <DialogContent>
+        <DialogContentText>{message}</DialogContentText>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2.5 }}>
+        <Button onClick={onCancel} color="inherit">Cancelar</Button>
+        <Button onClick={onConfirm} variant="contained" sx={{ bgcolor: academic.rust, "&:hover": { bgcolor: academic.rust } }}>
+          {confirmLabel}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\ConfirmDialog.jsx") -Content $content_fe_confirmdialog
+
     $content_fe_auth_ctx = @'
-import { createContext, useContext, useState, useEffect } from "react";
+﻿import { createContext, useContext, useState, useEffect } from "react";
+import { client } from "../graphql/client";
+import { LOGOUT_MUTATION } from "../graphql/operations";
 const AuthContext = createContext();
 
 export function AuthProvider({ children }) {
@@ -2059,7 +2665,14 @@ export function AuthProvider({ children }) {
     localStorage.setItem("user", JSON.stringify(userData));
     setUser(userData);
   };
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await client.mutate({ mutation: LOGOUT_MUTATION });
+    } catch {
+      // El token puede ya haber expirado o ser invalido; de todas formas
+      // se limpia la sesion localmente.
+    }
+    await client.clearStore();
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     setUser(null);
@@ -2074,8 +2687,8 @@ export const useAuth = () => useContext(AuthContext);
     $content_fe_login = @'
 import { useState } from "react";
 import { useMutation } from "@apollo/client";
-import { useNavigate } from "react-router-dom";
-import { Button, TextField, Box, Typography, Paper } from "@mui/material";
+import { useNavigate, Link as RouterLink } from "react-router-dom";
+import { Button, TextField, Box, Typography, Paper, Link } from "@mui/material";
 import { LOGIN_MUTATION } from "../graphql/operations";
 import { useAuth } from "./AuthContext";
 import { validateEmail, validateRequired, ERROR_MESSAGES } from "../utils/validation";
@@ -2171,6 +2784,12 @@ export default function LoginPage() {
             Entrar
           </Button>
         </form>
+
+        <Typography variant="body2" sx={{ mt: 3, textAlign: "center" }}>
+          <Link component={RouterLink} to="/registro" sx={{ color: academic.gold }}>
+            No tengo cuenta, registrarme
+          </Link>
+        </Typography>
       </Paper>
       <ErrorSnackbar open={!!error} message={error} onClose={clearError} />
     </Box>
@@ -2178,6 +2797,128 @@ export default function LoginPage() {
 }
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\auth\LoginPage.jsx") -Content $content_fe_login
+
+    $content_fe_register = @'
+import { useState } from "react";
+import { Link as RouterLink, useNavigate } from "react-router-dom";
+import { Button, TextField, Box, Typography, Paper, Link } from "@mui/material";
+import { validateEmail, validateRequired, validatePasswordStrength, ERROR_MESSAGES } from "../utils/validation";
+import { useErrorHandler } from "../errors/useErrorHandler";
+import ErrorSnackbar from "../errors/ErrorSnackbar";
+import { apiFetch } from "../utils/apiClient";
+import { academic } from "../theme";
+
+export default function RegisterPage() {
+  const [correo, setCorreo] = useState("");
+  const [pass, setPass] = useState("");
+  const [formError, setFormError] = useState("");
+  const [exito, setExito] = useState(false);
+  const { error, showError, clearError } = useErrorHandler();
+  const navigate = useNavigate();
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setFormError("");
+    if (!validateRequired(correo) || !validateEmail(correo)) {
+      setFormError(ERROR_MESSAGES.formatoEmailInvalido);
+      return;
+    }
+    if (!validatePasswordStrength(pass)) {
+      setFormError(ERROR_MESSAGES.passwordDebil);
+      return;
+    }
+    try {
+      await apiFetch("/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ correo, contrasena: pass }),
+      });
+      setExito(true);
+      setTimeout(() => navigate("/login"), 1500);
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  return (
+    <Box
+      sx={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        bgcolor: academic.ink,
+        px: 2,
+      }}
+    >
+      <Paper
+        elevation={0}
+        sx={{
+          width: "100%",
+          maxWidth: 420,
+          p: 5,
+          pt: 4.5,
+          borderTop: `4px solid ${academic.gold}`,
+          bgcolor: academic.paperElevated,
+        }}
+      >
+        <Typography variant="overline" sx={{ color: academic.gold, fontWeight: 500, textAlign: "center", display: "block" }}>
+          Acceso institucional
+        </Typography>
+        <Typography variant="h4" sx={{ mt: 0.5, mb: 0.5, textAlign: "center" }}>
+          Crear cuenta
+        </Typography>
+        <Typography variant="subtitle1" sx={{ mb: 4 }}>
+          El registro publico crea una cuenta con rol docente.
+        </Typography>
+
+        {exito ? (
+          <Typography sx={{ color: academic.sage, textAlign: "center" }}>
+            Cuenta creada. Redirigiendo al inicio de sesion...
+          </Typography>
+        ) : (
+          <form onSubmit={handleRegister} noValidate>
+            <Typography variant="caption" sx={{ color: academic.inkMuted, letterSpacing: "0.06em" }}>
+              CORREO INSTITUCIONAL
+            </Typography>
+            <TextField
+              fullWidth
+              margin="dense"
+              placeholder="nombre@academico.com"
+              value={correo}
+              onChange={(e) => setCorreo(e.target.value)}
+              error={!!formError}
+              sx={{ mb: 2.5 }}
+            />
+            <Typography variant="caption" sx={{ color: academic.inkMuted, letterSpacing: "0.06em" }}>
+              CONTRASENA
+            </Typography>
+            <TextField
+              fullWidth
+              margin="dense"
+              type="password"
+              value={pass}
+              onChange={(e) => setPass(e.target.value)}
+              error={!!formError}
+              helperText={formError || ERROR_MESSAGES.passwordDebil}
+            />
+            <Button fullWidth variant="contained" type="submit" size="large" sx={{ mt: 3.5 }}>
+              Registrarme
+            </Button>
+          </form>
+        )}
+
+        <Typography variant="body2" sx={{ mt: 3, textAlign: "center" }}>
+          <Link component={RouterLink} to="/login" sx={{ color: academic.gold }}>
+            Ya tengo cuenta, iniciar sesion
+          </Link>
+        </Typography>
+      </Paper>
+      <ErrorSnackbar open={!!error} message={error} onClose={clearError} />
+    </Box>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\auth\RegisterPage.jsx") -Content $content_fe_register
 
     $content_fe_layout = @'
 import { Box, Drawer, List, ListItem, ListItemButton, ListItemText, AppBar, Toolbar, Typography, Button } from "@mui/material";
@@ -2198,14 +2939,24 @@ export default function Layout() {
     { index: "02", text: "Docentes", path: "/docentes" },
     { index: "03", text: "Cursos", path: "/cursos" },
     { index: "04", text: "Inscripciones", path: "/inscripciones" },
+    ...(user.rol === "administrador"
+      ? [
+          { index: "05", text: "Roles", path: "/roles" },
+          { index: "06", text: "Auditoria", path: "/auditoria" },
+        ]
+      : []),
   ];
 
   return (
     <Box sx={{ display: "flex" }}>
       <AppBar position="fixed" sx={{ zIndex: 1201 }}>
         <Toolbar sx={{ gap: 2 }}>
-          <Typography variant="h6" sx={{ flexGrow: 1, letterSpacing: "0.02em" }}>
-            SGA <Box component="span" sx={{ color: academic.gold }}>&middot;</Box> Sistema de Gestion Academica
+          <Typography
+            variant="h6"
+            onClick={() => navigate("/")}
+            sx={{ flexGrow: 1, letterSpacing: "0.02em", cursor: "pointer", "&:hover": { opacity: 0.85 } }}
+          >
+            SGA <Box component="span" sx={{ color: academic.gold }}>·</Box> Sistema de Gestion Academica
           </Typography>
           <Typography
             sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.8rem", opacity: 0.85 }}
@@ -2252,7 +3003,7 @@ export default function Layout() {
                   </Typography>
                   <ListItemText
                     primary={m.text}
-                    primaryTypographyProps={{ fontWeight: selected ? 600 : 400 }}
+                    slotProps={{ primary: { fontWeight: selected ? 600 : 400 } }}
                   />
                 </ListItemButton>
               </ListItem>
@@ -2271,24 +3022,109 @@ export default function Layout() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\Layout.jsx") -Content $content_fe_layout
 
     $content_fe_estudiantes = @'
-import { useQuery } from "@apollo/client";
-import { GET_ESTUDIANTES } from "../../graphql/operations";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import {
+  Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box,
+  Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack,
+} from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import EditIcon from "@mui/icons-material/EditOutlined";
+import DeleteIcon from "@mui/icons-material/DeleteOutlined";
 import PageHeader from "../../design-system/components/PageHeader";
+import ConfirmDialog from "../../design-system/components/ConfirmDialog";
+import ErrorSnackbar from "../../errors/ErrorSnackbar";
+import { useErrorHandler } from "../../errors/useErrorHandler";
+import { useFormValidation } from "../../utils/useFormValidation";
+import { validateRequired, validateEmail, ERROR_MESSAGES } from "../../utils/validation";
+import { GET_ESTUDIANTES, CREAR_ESTUDIANTE, ACTUALIZAR_ESTUDIANTE, ELIMINAR_ESTUDIANTE } from "../../graphql/operations";
+import { useAuth } from "../../auth/AuthContext";
+
+const VALORES_INICIALES = { nombre: "", codigo: "", correo: "", datos_contacto: "" };
+
+const REGLAS = {
+  nombre: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+  codigo: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+  correo: (v) => (validateEmail(v) ? null : ERROR_MESSAGES.formatoEmailInvalido),
+};
 
 export default function EstudiantesPage() {
-  const { data, loading, error } = useQuery(GET_ESTUDIANTES);
+  const { user } = useAuth();
+  const esAdmin = user?.rol === "administrador";
+  const { data, loading, error, refetch } = useQuery(GET_ESTUDIANTES);
+  const { error: formError, showError, clearError } = useErrorHandler();
+  const { values, errors, handleChange, validateAll, setValues } = useFormValidation(VALORES_INICIALES, REGLAS);
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editando, setEditando] = useState(null);
+  const [aEliminar, setAEliminar] = useState(null);
+
+  const [crearEstudiante] = useMutation(CREAR_ESTUDIANTE);
+  const [actualizarEstudiante] = useMutation(ACTUALIZAR_ESTUDIANTE);
+  const [eliminarEstudiante] = useMutation(ELIMINAR_ESTUDIANTE);
+
+  const abrirNuevo = () => {
+    setEditando(null);
+    setValues(VALORES_INICIALES);
+    setDialogOpen(true);
+  };
+
+  const abrirEditar = (estudiante) => {
+    setEditando(estudiante);
+    setValues({
+      nombre: estudiante.nombre,
+      codigo: estudiante.codigo,
+      correo: estudiante.correo,
+      datos_contacto: estudiante.datos_contacto || "",
+    });
+    setDialogOpen(true);
+  };
+
+  const guardar = async () => {
+    if (!validateAll()) return;
+    try {
+      if (editando) {
+        await actualizarEstudiante({ variables: { id: editando.id, datos: values } });
+      } else {
+        await crearEstudiante({ variables: { datos: values } });
+      }
+      setDialogOpen(false);
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  const confirmarEliminar = async () => {
+    const objetivo = aEliminar;
+    setAEliminar(null);
+    try {
+      await eliminarEstudiante({ variables: { id: objetivo.id } });
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
 
   return (
     <Box>
       <PageHeader
         eyebrow="Registro 01"
         title="Estudiantes"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.estudiantes.length} matriculados
-          </Typography>
-        )}
+        action={
+          <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
+            {data && (
+              <Typography variant="caption" sx={{ color: "text.secondary", lineHeight: 1 }}>
+                {data.estudiantes.length} matriculados
+              </Typography>
+            )}
+            {esAdmin && (
+              <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={abrirNuevo}>
+                Nuevo
+              </Button>
+            )}
+          </Stack>
+        }
       />
 
       {loading && <CircularProgress size={24} />}
@@ -2302,6 +3138,7 @@ export default function EstudiantesPage() {
                 <TableCell width={110}>Codigo</TableCell>
                 <TableCell>Nombre</TableCell>
                 <TableCell>Correo</TableCell>
+                {esAdmin && <TableCell width={100} align="right">Acciones</TableCell>}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -2312,12 +3149,44 @@ export default function EstudiantesPage() {
                   </TableCell>
                   <TableCell sx={{ fontWeight: 500 }}>{e.nombre}</TableCell>
                   <TableCell sx={{ color: "text.secondary" }}>{e.correo}</TableCell>
+                  {esAdmin && (
+                    <TableCell align="right">
+                      <IconButton size="small" onClick={() => abrirEditar(e)}><EditIcon fontSize="small" /></IconButton>
+                      <IconButton size="small" onClick={() => setAEliminar(e)}><DeleteIcon fontSize="small" /></IconButton>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </Paper>
       )}
+
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>{editando ? "Editar estudiante" : "Nuevo estudiante"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Nombre" value={values.nombre} onChange={handleChange("nombre")} error={!!errors.nombre} helperText={errors.nombre} fullWidth />
+            <TextField label="Codigo" value={values.codigo} onChange={handleChange("codigo")} error={!!errors.codigo} helperText={errors.codigo} fullWidth disabled={!!editando} />
+            <TextField label="Correo" value={values.correo} onChange={handleChange("correo")} error={!!errors.correo} helperText={errors.correo} fullWidth />
+            <TextField label="Datos de contacto" value={values.datos_contacto} onChange={handleChange("datos_contacto")} fullWidth />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setDialogOpen(false)} color="inherit">Cancelar</Button>
+          <Button onClick={guardar} variant="contained">Guardar</Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!aEliminar}
+        title="Eliminar estudiante"
+        message={`Se dara de baja a "${aEliminar?.nombre}".`}
+        onConfirm={confirmarEliminar}
+        onCancel={() => setAEliminar(null)}
+      />
+
+      <ErrorSnackbar open={!!formError} message={formError} onClose={clearError} />
     </Box>
   );
 }
@@ -2374,9 +3243,15 @@ const SECCIONES = [
   { index: "04", text: "Inscripciones", path: "/inscripciones", desc: "Movimientos de matricula" },
 ];
 
+const SECCIONES_ADMIN = [
+  { index: "05", text: "Roles", path: "/roles", desc: "Roles del sistema y sus permisos" },
+  { index: "06", text: "Auditoria", path: "/auditoria", desc: "Historial de acciones, exportacion y retencion" },
+];
+
 export default function InicioPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const secciones = user?.rol === "administrador" ? [...SECCIONES, ...SECCIONES_ADMIN] : SECCIONES;
 
   return (
     <Box>
@@ -2391,7 +3266,7 @@ export default function InicioPage() {
       </Typography>
 
       <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
-        {SECCIONES.map((s) => (
+        {secciones.map((s) => (
           <Paper
             key={s.path}
             variant="outlined"
@@ -2422,14 +3297,17 @@ export default function InicioPage() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inicio\InicioPage.jsx") -Content $content_fe_inicio
 
     $content_fe_app = @'
-import { Routes, Route, Navigate } from "react-router-dom";
+﻿import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./auth/LoginPage";
+import RegisterPage from "./auth/RegisterPage";
 import Layout from "./design-system/components/Layout";
 import InicioPage from "./modules/inicio/InicioPage";
 import EstudiantesPage from "./modules/estudiantes/EstudiantesPage";
 import DocentesPage from "./modules/docentes/DocentesPage";
 import CursosPage from "./modules/cursos/CursosPage";
 import InscripcionesPage from "./modules/inscripciones/InscripcionesPage";
+import RolesPage from "./modules/roles/RolesPage";
+import AuditoriaPage from "./modules/auditoria/AuditoriaPage";
 import { useAuth } from "./auth/AuthContext";
 
 function Protected({ children }) {
@@ -2438,16 +3316,25 @@ function Protected({ children }) {
   return user ? children : <Navigate to="/login" />;
 }
 
+function SoloAdmin({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  return user?.rol === "administrador" ? children : <Navigate to="/" />;
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/registro" element={<RegisterPage />} />
       <Route path="/" element={<Protected><Layout /></Protected>}>
         <Route index element={<InicioPage />} />
         <Route path="estudiantes" element={<EstudiantesPage />} />
         <Route path="docentes" element={<DocentesPage />} />
         <Route path="cursos" element={<CursosPage />} />
         <Route path="inscripciones" element={<InscripcionesPage />} />
+        <Route path="roles" element={<SoloAdmin><RolesPage /></SoloAdmin>} />
+        <Route path="auditoria" element={<SoloAdmin><AuditoriaPage /></SoloAdmin>} />
       </Route>
     </Routes>
   );
@@ -2457,27 +3344,103 @@ export default function App() {
 
     # --- Frontend: Docentes, Cursos, Inscripciones ---
     $content_fe_docentes = @'
-import { useQuery, gql } from "@apollo/client";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import {
+  Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box,
+  Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack,
+} from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import EditIcon from "@mui/icons-material/EditOutlined";
+import DeleteIcon from "@mui/icons-material/DeleteOutlined";
 import PageHeader from "../../design-system/components/PageHeader";
+import ConfirmDialog from "../../design-system/components/ConfirmDialog";
+import ErrorSnackbar from "../../errors/ErrorSnackbar";
+import { useErrorHandler } from "../../errors/useErrorHandler";
+import { useFormValidation } from "../../utils/useFormValidation";
+import { validateRequired, validateEmail, ERROR_MESSAGES } from "../../utils/validation";
+import { GET_DOCENTES, CREAR_DOCENTE, ACTUALIZAR_DOCENTE, ELIMINAR_DOCENTE } from "../../graphql/operations";
+import { useAuth } from "../../auth/AuthContext";
 
-const GET_DOCENTES = gql`
-  query { docentes { id nombre correo especialidad } }
-`;
+const VALORES_INICIALES = { nombre: "", correo: "", especialidad: "" };
+
+const REGLAS = {
+  nombre: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+  correo: (v) => (validateEmail(v) ? null : ERROR_MESSAGES.formatoEmailInvalido),
+};
 
 export default function DocentesPage() {
-  const { data, loading, error } = useQuery(GET_DOCENTES);
+  const { user } = useAuth();
+  const esAdmin = user?.rol === "administrador";
+  const { data, loading, error, refetch } = useQuery(GET_DOCENTES);
+  const { error: formError, showError, clearError } = useErrorHandler();
+  const { values, errors, handleChange, validateAll, setValues } = useFormValidation(VALORES_INICIALES, REGLAS);
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editando, setEditando] = useState(null);
+  const [aEliminar, setAEliminar] = useState(null);
+
+  const [crearDocente] = useMutation(CREAR_DOCENTE);
+  const [actualizarDocente] = useMutation(ACTUALIZAR_DOCENTE);
+  const [eliminarDocente] = useMutation(ELIMINAR_DOCENTE);
+
+  const abrirNuevo = () => {
+    setEditando(null);
+    setValues(VALORES_INICIALES);
+    setDialogOpen(true);
+  };
+
+  const abrirEditar = (docente) => {
+    setEditando(docente);
+    setValues({ nombre: docente.nombre, correo: docente.correo, especialidad: docente.especialidad || "" });
+    setDialogOpen(true);
+  };
+
+  const guardar = async () => {
+    if (!validateAll()) return;
+    try {
+      if (editando) {
+        await actualizarDocente({ variables: { id: editando.id, datos: values } });
+      } else {
+        await crearDocente({ variables: { datos: values } });
+      }
+      setDialogOpen(false);
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  const confirmarEliminar = async () => {
+    const objetivo = aEliminar;
+    setAEliminar(null);
+    try {
+      await eliminarDocente({ variables: { id: objetivo.id } });
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
 
   return (
     <Box>
       <PageHeader
         eyebrow="Registro 02"
         title="Docentes"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.docentes.length} en planta
-          </Typography>
-        )}
+        action={
+          <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
+            {data && (
+              <Typography variant="caption" sx={{ color: "text.secondary", lineHeight: 1 }}>
+                {data.docentes.length} en planta
+              </Typography>
+            )}
+            {esAdmin && (
+              <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={abrirNuevo}>
+                Nuevo
+              </Button>
+            )}
+          </Stack>
+        }
       />
 
       {loading && <CircularProgress size={24} />}
@@ -2491,6 +3454,7 @@ export default function DocentesPage() {
                 <TableCell>Nombre</TableCell>
                 <TableCell>Correo</TableCell>
                 <TableCell>Especialidad</TableCell>
+                {esAdmin && <TableCell width={100} align="right">Acciones</TableCell>}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -2499,12 +3463,43 @@ export default function DocentesPage() {
                   <TableCell sx={{ fontWeight: 500 }}>{d.nombre}</TableCell>
                   <TableCell sx={{ color: "text.secondary" }}>{d.correo}</TableCell>
                   <TableCell>{d.especialidad || "Sin especialidad"}</TableCell>
+                  {esAdmin && (
+                    <TableCell align="right">
+                      <IconButton size="small" onClick={() => abrirEditar(d)}><EditIcon fontSize="small" /></IconButton>
+                      <IconButton size="small" onClick={() => setAEliminar(d)}><DeleteIcon fontSize="small" /></IconButton>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </Paper>
       )}
+
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>{editando ? "Editar docente" : "Nuevo docente"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Nombre" value={values.nombre} onChange={handleChange("nombre")} error={!!errors.nombre} helperText={errors.nombre} fullWidth />
+            <TextField label="Correo" value={values.correo} onChange={handleChange("correo")} error={!!errors.correo} helperText={errors.correo} fullWidth />
+            <TextField label="Especialidad" value={values.especialidad} onChange={handleChange("especialidad")} fullWidth />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setDialogOpen(false)} color="inherit">Cancelar</Button>
+          <Button onClick={guardar} variant="contained">Guardar</Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!aEliminar}
+        title="Eliminar docente"
+        message={`Se dara de baja a "${aEliminar?.nombre}".`}
+        onConfirm={confirmarEliminar}
+        onCancel={() => setAEliminar(null)}
+      />
+
+      <ErrorSnackbar open={!!formError} message={formError} onClose={clearError} />
     </Box>
   );
 }
@@ -2512,27 +3507,111 @@ export default function DocentesPage() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\docentes\DocentesPage.jsx") -Content $content_fe_docentes
 
     $content_fe_cursos = @'
-import { useQuery, gql } from "@apollo/client";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import {
+  Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box,
+  Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack, MenuItem,
+} from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import EditIcon from "@mui/icons-material/EditOutlined";
+import DeleteIcon from "@mui/icons-material/DeleteOutlined";
 import PageHeader from "../../design-system/components/PageHeader";
+import ConfirmDialog from "../../design-system/components/ConfirmDialog";
+import ErrorSnackbar from "../../errors/ErrorSnackbar";
+import { useErrorHandler } from "../../errors/useErrorHandler";
+import { useFormValidation } from "../../utils/useFormValidation";
+import { validateRequired, ERROR_MESSAGES } from "../../utils/validation";
+import { GET_CURSOS, GET_DOCENTES, CREAR_CURSO, ACTUALIZAR_CURSO, ELIMINAR_CURSO } from "../../graphql/operations";
+import { useAuth } from "../../auth/AuthContext";
 
-const GET_CURSOS = gql`
-  query { cursos { id nombre periodo_academico } }
-`;
+const VALORES_INICIALES = { nombre: "", docente_id: "", periodo_academico: "" };
 
+const REGLAS = {
+  nombre: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+  docente_id: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+  periodo_academico: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+};
+
+// Docentes con permiso "actualizar_cursos" pueden editar cursos existentes
+// (CA-003), pero solo un administrador puede crear o eliminar.
 export default function CursosPage() {
-  const { data, loading, error } = useQuery(GET_CURSOS);
+  const { user } = useAuth();
+  const esAdmin = user?.rol === "administrador";
+  const puedeEditar = esAdmin || user?.rol === "docente";
+  const { data, loading, error, refetch } = useQuery(GET_CURSOS);
+  const { data: dataDocentes } = useQuery(GET_DOCENTES);
+  const { error: formError, showError, clearError } = useErrorHandler();
+  const { values, errors, handleChange, validateAll, setValues } = useFormValidation(VALORES_INICIALES, REGLAS);
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editando, setEditando] = useState(null);
+  const [aEliminar, setAEliminar] = useState(null);
+
+  const [crearCurso] = useMutation(CREAR_CURSO);
+  const [actualizarCurso] = useMutation(ACTUALIZAR_CURSO);
+  const [eliminarCurso] = useMutation(ELIMINAR_CURSO);
+
+  const nombreDocente = (id) => dataDocentes?.docentes.find((d) => d.id === id)?.nombre || `#${id}`;
+
+  const abrirNuevo = () => {
+    setEditando(null);
+    setValues(VALORES_INICIALES);
+    setDialogOpen(true);
+  };
+
+  const abrirEditar = (curso) => {
+    setEditando(curso);
+    setValues({ nombre: curso.nombre, docente_id: curso.docente_id, periodo_academico: curso.periodo_academico });
+    setDialogOpen(true);
+  };
+
+  const guardar = async () => {
+    if (!validateAll()) return;
+    try {
+      const datos = { ...values, docente_id: Number(values.docente_id) };
+      if (editando) {
+        await actualizarCurso({ variables: { id: editando.id, datos } });
+      } else {
+        await crearCurso({ variables: { datos } });
+      }
+      setDialogOpen(false);
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  const confirmarEliminar = async () => {
+    const objetivo = aEliminar;
+    setAEliminar(null);
+    try {
+      await eliminarCurso({ variables: { id: objetivo.id } });
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
 
   return (
     <Box>
       <PageHeader
         eyebrow="Registro 03"
         title="Cursos"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.cursos.length} activos
-          </Typography>
-        )}
+        action={
+          <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
+            {data && (
+              <Typography variant="caption" sx={{ color: "text.secondary", lineHeight: 1 }}>
+                {data.cursos.length} activos
+              </Typography>
+            )}
+            {esAdmin && (
+              <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={abrirNuevo}>
+                Nuevo
+              </Button>
+            )}
+          </Stack>
+        }
       />
 
       {loading && <CircularProgress size={24} />}
@@ -2544,22 +3623,68 @@ export default function CursosPage() {
             <TableHead>
               <TableRow>
                 <TableCell>Curso</TableCell>
-                <TableCell width={160}>Periodo</TableCell>
+                <TableCell>Docente</TableCell>
+                <TableCell width={140}>Periodo</TableCell>
+                {puedeEditar && <TableCell width={100} align="right">Acciones</TableCell>}
               </TableRow>
             </TableHead>
             <TableBody>
               {data.cursos.map((c) => (
                 <TableRow key={c.id} hover>
                   <TableCell sx={{ fontWeight: 500 }}>{c.nombre}</TableCell>
+                  <TableCell sx={{ color: "text.secondary" }}>{nombreDocente(c.docente_id)}</TableCell>
                   <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem", color: "text.secondary" }}>
                     {c.periodo_academico}
                   </TableCell>
+                  {puedeEditar && (
+                    <TableCell align="right">
+                      <IconButton size="small" onClick={() => abrirEditar(c)}><EditIcon fontSize="small" /></IconButton>
+                      {esAdmin && <IconButton size="small" onClick={() => setAEliminar(c)}><DeleteIcon fontSize="small" /></IconButton>}
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </Paper>
       )}
+
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>{editando ? "Editar curso" : "Nuevo curso"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Nombre" value={values.nombre} onChange={handleChange("nombre")} error={!!errors.nombre} helperText={errors.nombre} fullWidth />
+            <TextField
+              select
+              label="Docente"
+              value={values.docente_id}
+              onChange={handleChange("docente_id")}
+              error={!!errors.docente_id}
+              helperText={errors.docente_id}
+              fullWidth
+            >
+              {(dataDocentes?.docentes || []).map((d) => (
+                <MenuItem key={d.id} value={d.id}>{d.nombre}</MenuItem>
+              ))}
+            </TextField>
+            <TextField label="Periodo academico" placeholder="2026-1" value={values.periodo_academico} onChange={handleChange("periodo_academico")} error={!!errors.periodo_academico} helperText={errors.periodo_academico} fullWidth />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setDialogOpen(false)} color="inherit">Cancelar</Button>
+          <Button onClick={guardar} variant="contained">Guardar</Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!aEliminar}
+        title="Eliminar curso"
+        message={`Se eliminara el curso "${aEliminar?.nombre}" de forma permanente.`}
+        onConfirm={confirmarEliminar}
+        onCancel={() => setAEliminar(null)}
+      />
+
+      <ErrorSnackbar open={!!formError} message={formError} onClose={clearError} />
     </Box>
   );
 }
@@ -2567,28 +3692,116 @@ export default function CursosPage() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\cursos\CursosPage.jsx") -Content $content_fe_cursos
 
     $content_fe_insc = @'
-import { useQuery, gql } from "@apollo/client";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import {
+  Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box,
+  Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack, MenuItem,
+} from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import EditIcon from "@mui/icons-material/EditOutlined";
+import DeleteIcon from "@mui/icons-material/DeleteOutlined";
 import PageHeader from "../../design-system/components/PageHeader";
 import StatusStamp from "../../design-system/components/StatusStamp";
+import ConfirmDialog from "../../design-system/components/ConfirmDialog";
+import ErrorSnackbar from "../../errors/ErrorSnackbar";
+import { useErrorHandler } from "../../errors/useErrorHandler";
+import { useFormValidation } from "../../utils/useFormValidation";
+import { validateRequired, ERROR_MESSAGES } from "../../utils/validation";
+import {
+  GET_INSCRIPCIONES, GET_ESTUDIANTES, GET_CURSOS,
+  CREAR_INSCRIPCION, ACTUALIZAR_INSCRIPCION, ELIMINAR_INSCRIPCION,
+} from "../../graphql/operations";
+import { useAuth } from "../../auth/AuthContext";
 
-const GET_INSC = gql`
-  query { inscripciones { id estado } }
-`;
+const ESTADOS = ["activa", "cerrada", "cupo_lleno"];
+const VALORES_INICIALES = { estudiante_id: "", curso_id: "", estado: "activa" };
+
+const REGLAS = {
+  estudiante_id: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+  curso_id: (v) => (validateRequired(v) ? null : ERROR_MESSAGES.campoRequerido),
+};
 
 export default function InscripcionesPage() {
-  const { data, loading, error } = useQuery(GET_INSC);
+  const { user } = useAuth();
+  const esAdmin = user?.rol === "administrador";
+  const puedeCrear = esAdmin || user?.rol === "docente";
+  const { data, loading, error, refetch } = useQuery(GET_INSCRIPCIONES);
+  const { data: dataEstudiantes } = useQuery(GET_ESTUDIANTES);
+  const { data: dataCursos } = useQuery(GET_CURSOS);
+  const { error: formError, showError, clearError } = useErrorHandler();
+  const { values, errors, handleChange, validateAll, setValues } = useFormValidation(VALORES_INICIALES, REGLAS);
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editando, setEditando] = useState(null);
+  const [aEliminar, setAEliminar] = useState(null);
+
+  const [crearInscripcion] = useMutation(CREAR_INSCRIPCION);
+  const [actualizarInscripcion] = useMutation(ACTUALIZAR_INSCRIPCION);
+  const [eliminarInscripcion] = useMutation(ELIMINAR_INSCRIPCION);
+
+  const nombreEstudiante = (id) => dataEstudiantes?.estudiantes.find((e) => e.id === id)?.nombre || `#${id}`;
+  const nombreCurso = (id) => dataCursos?.cursos.find((c) => c.id === id)?.nombre || `#${id}`;
+
+  const abrirNuevo = () => {
+    setEditando(null);
+    setValues(VALORES_INICIALES);
+    setDialogOpen(true);
+  };
+
+  const abrirEditar = (inscripcion) => {
+    setEditando(inscripcion);
+    setValues({ estudiante_id: inscripcion.estudiante_id, curso_id: inscripcion.curso_id, estado: inscripcion.estado });
+    setDialogOpen(true);
+  };
+
+  const guardar = async () => {
+    if (!validateAll()) return;
+    try {
+      if (editando) {
+        await actualizarInscripcion({ variables: { id: editando.id, datos: { estado: values.estado } } });
+      } else {
+        await crearInscripcion({
+          variables: { datos: { estudiante_id: Number(values.estudiante_id), curso_id: Number(values.curso_id), estado: values.estado } },
+        });
+      }
+      setDialogOpen(false);
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  const confirmarEliminar = async () => {
+    const objetivo = aEliminar;
+    setAEliminar(null);
+    try {
+      await eliminarInscripcion({ variables: { id: objetivo.id } });
+      refetch();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
 
   return (
     <Box>
       <PageHeader
         eyebrow="Registro 04"
         title="Inscripciones"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.inscripciones.length} movimientos
-          </Typography>
-        )}
+        action={
+          <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
+            {data && (
+              <Typography variant="caption" sx={{ color: "text.secondary", lineHeight: 1 }}>
+                {data.inscripciones.length} movimientos
+              </Typography>
+            )}
+            {puedeCrear && (
+              <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={abrirNuevo}>
+                Nueva
+              </Button>
+            )}
+          </Stack>
+        }
       />
 
       {loading && <CircularProgress size={24} />}
@@ -2599,8 +3812,11 @@ export default function InscripcionesPage() {
           <Table>
             <TableHead>
               <TableRow>
-                <TableCell width={140}>Numero</TableCell>
-                <TableCell>Estado</TableCell>
+                <TableCell width={100}>Numero</TableCell>
+                <TableCell>Estudiante</TableCell>
+                <TableCell>Curso</TableCell>
+                <TableCell width={140}>Estado</TableCell>
+                {puedeCrear && <TableCell width={100} align="right">Acciones</TableCell>}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -2609,8 +3825,118 @@ export default function InscripcionesPage() {
                   <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem" }}>
                     #{String(i.id).padStart(4, "0")}
                   </TableCell>
+                  <TableCell>{nombreEstudiante(i.estudiante_id)}</TableCell>
+                  <TableCell sx={{ color: "text.secondary" }}>{nombreCurso(i.curso_id)}</TableCell>
                   <TableCell>
                     <StatusStamp estado={i.estado} />
+                  </TableCell>
+                  {puedeCrear && (
+                    <TableCell align="right">
+                      <IconButton size="small" onClick={() => abrirEditar(i)}><EditIcon fontSize="small" /></IconButton>
+                      {esAdmin && <IconButton size="small" onClick={() => setAEliminar(i)}><DeleteIcon fontSize="small" /></IconButton>}
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>{editando ? "Editar inscripcion" : "Nueva inscripcion"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              select label="Estudiante" value={values.estudiante_id} onChange={handleChange("estudiante_id")}
+              error={!!errors.estudiante_id} helperText={errors.estudiante_id} fullWidth disabled={!!editando}
+            >
+              {(dataEstudiantes?.estudiantes || []).map((e) => (
+                <MenuItem key={e.id} value={e.id}>{e.nombre}</MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              select label="Curso" value={values.curso_id} onChange={handleChange("curso_id")}
+              error={!!errors.curso_id} helperText={errors.curso_id} fullWidth disabled={!!editando}
+            >
+              {(dataCursos?.cursos || []).map((c) => (
+                <MenuItem key={c.id} value={c.id}>{c.nombre}</MenuItem>
+              ))}
+            </TextField>
+            <TextField select label="Estado" value={values.estado} onChange={handleChange("estado")} fullWidth>
+              {ESTADOS.map((e) => (
+                <MenuItem key={e} value={e}>{e}</MenuItem>
+              ))}
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setDialogOpen(false)} color="inherit">Cancelar</Button>
+          <Button onClick={guardar} variant="contained">Guardar</Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!aEliminar}
+        title="Eliminar inscripcion"
+        message={`Se eliminara la inscripcion #${String(aEliminar?.id || 0).padStart(4, "0")}.`}
+        onConfirm={confirmarEliminar}
+        onCancel={() => setAEliminar(null)}
+      />
+
+      <ErrorSnackbar open={!!formError} message={formError} onClose={clearError} />
+    </Box>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inscripciones\InscripcionesPage.jsx") -Content $content_fe_insc
+
+    $content_fe_roles = @'
+import { useEffect, useState } from "react";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box, Chip } from "@mui/material";
+import PageHeader from "../../design-system/components/PageHeader";
+import ErrorSnackbar from "../../errors/ErrorSnackbar";
+import { useErrorHandler } from "../../errors/useErrorHandler";
+import { apiFetch } from "../../utils/apiClient";
+
+export default function RolesPage() {
+  const [roles, setRoles] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const { error, showError, clearError } = useErrorHandler();
+
+  useEffect(() => {
+    apiFetch("/roles/")
+      .then(setRoles)
+      .catch((err) => showError(err.message))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <Box>
+      <PageHeader eyebrow="CA-003" title="Roles y permisos" />
+
+      {loading && <CircularProgress size={24} />}
+
+      {roles && (
+        <Paper variant="outlined">
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell width={200}>Rol</TableCell>
+                <TableCell>Permisos</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {roles.map((r) => (
+                <TableRow key={r.rol} hover>
+                  <TableCell sx={{ fontWeight: 500, textTransform: "capitalize" }}>{r.rol}</TableCell>
+                  <TableCell>
+                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+                      {r.permisos.map((p) => (
+                        <Chip key={p} label={p} size="small" variant="outlined" sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.7rem" }} />
+                      ))}
+                    </Box>
                   </TableCell>
                 </TableRow>
               ))}
@@ -2618,11 +3944,149 @@ export default function InscripcionesPage() {
           </Table>
         </Paper>
       )}
+
+      <ErrorSnackbar open={!!error} message={error} onClose={clearError} />
     </Box>
   );
 }
 '@
-    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inscripciones\InscripcionesPage.jsx") -Content $content_fe_insc
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\roles\RolesPage.jsx") -Content $content_fe_roles
+
+    $content_fe_auditoria = @'
+import { useEffect, useState } from "react";
+import {
+  Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box,
+  Button, Stack, Dialog, DialogTitle, DialogContent, DialogActions, TextField,
+} from "@mui/material";
+import DownloadIcon from "@mui/icons-material/DownloadOutlined";
+import DeleteSweepIcon from "@mui/icons-material/DeleteSweepOutlined";
+import PageHeader from "../../design-system/components/PageHeader";
+import ErrorSnackbar from "../../errors/ErrorSnackbar";
+import { useErrorHandler } from "../../errors/useErrorHandler";
+import { apiFetch, API_URL } from "../../utils/apiClient";
+
+export default function AuditoriaPage() {
+  const [registros, setRegistros] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const { error, showError, clearError } = useErrorHandler();
+  const [purgarOpen, setPurgarOpen] = useState(false);
+  const [dias, setDias] = useState("");
+
+  const cargar = () => {
+    setLoading(true);
+    apiFetch("/auditoria/?limite=100")
+      .then(setRegistros)
+      .catch((err) => showError(err.message))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(cargar, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const exportar = async () => {
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`${API_URL}/auditoria/exportar`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("No se pudo exportar la auditoria");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "auditoria.csv";
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  const purgar = async () => {
+    try {
+      const query = dias ? `?dias=${Number(dias)}` : "";
+      const resultado = await apiFetch(`/auditoria/purgar${query}`, { method: "POST" });
+      setPurgarOpen(false);
+      setDias("");
+      cargar();
+      showError(`Se eliminaron ${resultado.eliminados} registros (retencion: ${resultado.dias_retencion} dias).`);
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  return (
+    <Box>
+      <PageHeader
+        eyebrow="CA-009"
+        title="Auditoria"
+        action={
+          <Stack direction="row" spacing={1.5}>
+            <Button size="small" variant="outlined" startIcon={<DownloadIcon />} onClick={exportar}>
+              Exportar CSV
+            </Button>
+            <Button size="small" variant="outlined" startIcon={<DeleteSweepIcon />} onClick={() => setPurgarOpen(true)}>
+              Purgar antiguos
+            </Button>
+          </Stack>
+        }
+      />
+
+      {loading && <CircularProgress size={24} />}
+
+      {registros && (
+        <Paper variant="outlined">
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell width={170}>Fecha</TableCell>
+                <TableCell>Usuario</TableCell>
+                <TableCell>Recurso</TableCell>
+                <TableCell>Accion</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {registros.map((r) => (
+                <TableRow key={r.id} hover>
+                  <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.78rem" }}>
+                    {new Date(r.timestamp).toLocaleString()}
+                  </TableCell>
+                  <TableCell>{r.usuario_correo}</TableCell>
+                  <TableCell sx={{ color: "text.secondary" }}>{r.recurso}</TableCell>
+                  <TableCell sx={{ textTransform: "capitalize" }}>{r.accion}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+
+      <Dialog open={purgarOpen} onClose={() => setPurgarOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Purgar registros antiguos</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2, color: "text.secondary" }}>
+            Elimina registros de auditoria mas antiguos que el periodo indicado. Dejar vacio para usar la
+            retencion configurada por defecto del sistema.
+          </Typography>
+          <TextField
+            label="Dias de retencion"
+            type="number"
+            value={dias}
+            onChange={(e) => setDias(e.target.value)}
+            fullWidth
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setPurgarOpen(false)} color="inherit">Cancelar</Button>
+          <Button onClick={purgar} variant="contained">Purgar</Button>
+        </DialogActions>
+      </Dialog>
+
+      <ErrorSnackbar open={!!error} message={error} onClose={clearError} />
+    </Box>
+  );
+}
+'@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\auditoria\AuditoriaPage.jsx") -Content $content_fe_auditoria
 
     # Script de siembra de datos de ejemplo (no forma parte del catalogo
     # de Core Assets CA-001 a CA-011; es una utilidad opcional para tener
