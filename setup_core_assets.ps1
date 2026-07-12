@@ -176,16 +176,12 @@ function Ask-YesNo {
 }
 
 # --- Rol: Administrador ---
-if (Ask-YesNo "  Desea incluir el rol Administrador? (s/n)") {
-    Add-Content -Path $envFilePath -Value "ROLE_ADMIN=administrador" -Encoding UTF8
-    Write-Host "  [OK] Rol 'administrador' agregado al producto" -ForegroundColor Green
-}
-else {
-    Write-Host "  [X] Rol 'administrador' omitido" -ForegroundColor DarkGray
-}
+Add-Content -Path $envFilePath -Value "ROLE_ADMIN=administrador" -Encoding UTF8
+Write-Host "  [OK] Rol 'administrador' agregado al producto por defecto" -ForegroundColor Green
 
 # --- Rol: Docente ---
-if (Ask-YesNo "  Desea incluir el rol Docente? (s/n)") {
+$global:IncludeRolDocente = Ask-YesNo "  Desea agregar el usuario docente con rol (datos de prueba)? (s/n)"
+if ($global:IncludeRolDocente) {
     Add-Content -Path $envFilePath -Value "ROLE_DOCENTE=docente" -Encoding UTF8
     Write-Host "  [OK] Rol 'docente' agregado al producto" -ForegroundColor Green
 }
@@ -200,20 +196,22 @@ Write-Host "  [OK] Configuracion de roles completada" -ForegroundColor Green
 # ===========================================================================
 # CA-002 â€” GestiÃ³n de Usuarios (mÃ³dulos funcionales del producto)
 # Instala dependencias necesarias para los datos de usuario.
-# Los 4 modulos (Estudiante, Docente, Cursos, Inscripciones) se generan
-# siempre como parte fija del esqueleto en New-ProjectSkeleton
-# (backend/core/ca002_usuarios/) — no existe un flag de inclusion opcional,
-# asi que aqui ya no se pregunta ni se crean carpetas placeholder sueltas
-# que ningun otro archivo del proyecto termina usando.
+# Pregunta interactivamente que modulos incluir.
 # ===========================================================================
 
 Write-Host ""
 Write-Host "===== CA-002: Gestion de Usuarios =====" -ForegroundColor Cyan
+Write-Host "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
+Write-Host "  Configurador de modulos del producto."
+Write-Host "  Seleccione que modulos funcionales incluir."
+Write-Host "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
 
-# Instalar email-validator (necesario para EmailStr en Pydantic si se
-# incluye cualquier mÃ³dulo con datos de usuario).
+$global:IncludeEstudiantes = Ask-YesNo "  Desea incluir el modulo Estudiantes? (s/n)"
+$global:IncludeDocentes = Ask-YesNo "  Desea incluir el modulo Docentes? (s/n)"
+$global:IncludeCursos = Ask-YesNo "  Desea incluir el modulo Cursos? (s/n)"
+$global:IncludeInscripciones = Ask-YesNo "  Desea incluir el modulo Inscripciones? (s/n)"
+
 pip install --quiet email-validator
-
 Write-Host "  [OK] Dependencias de gestion de usuarios instaladas" -ForegroundColor Green
 
 
@@ -373,6 +371,17 @@ function New-ProjectSkeleton {
     npm install react-router-dom @apollo/client@3 graphql
     Pop-Location
 
+    # Eliminar archivos de demo generados por create-vite (main.jsx, App.jsx)
+    # para que Write-SkeletonFile los reemplace con los del proyecto.
+    $viteDefaults = @("src\main.jsx", "src\App.jsx")
+    foreach ($f in $viteDefaults) {
+        $fullPath = Join-Path $FRONTEND_DIR $f
+        if (Test-Path $fullPath) {
+            Remove-Item $fullPath -Force
+            Write-Host "  [LIMPIEZA] Eliminado archivo de demo Vite: $f" -ForegroundColor DarkGray
+        }
+    }
+
     Write-Host ""
     Write-Host "--- Creando directorios ---" -ForegroundColor Cyan
 
@@ -387,10 +396,6 @@ function New-ProjectSkeleton {
         (Join-Path $BACKEND_DIR "core\ca009_auditoria"),
         (Join-Path $BACKEND_DIR "core\ca010_config"),
         (Join-Path $FRONTEND_DIR "src\design-system\components"),
-        (Join-Path $FRONTEND_DIR "src\modules\estudiantes"),
-        (Join-Path $FRONTEND_DIR "src\modules\docentes"),
-        (Join-Path $FRONTEND_DIR "src\modules\cursos"),
-        (Join-Path $FRONTEND_DIR "src\modules\inscripciones"),
         (Join-Path $FRONTEND_DIR "src\modules\inicio"),
         (Join-Path $FRONTEND_DIR "src\auth"),
         (Join-Path $FRONTEND_DIR "src\graphql"),
@@ -398,6 +403,10 @@ function New-ProjectSkeleton {
         (Join-Path $FRONTEND_DIR "src\errors"),
         (Join-Path $PROJECT_ROOT ".github\workflows")
     )
+    if ($global:IncludeEstudiantes) { $directories += (Join-Path $FRONTEND_DIR "src\modules\estudiantes") }
+    if ($global:IncludeDocentes) { $directories += (Join-Path $FRONTEND_DIR "src\modules\docentes") }
+    if ($global:IncludeCursos) { $directories += (Join-Path $FRONTEND_DIR "src\modules\cursos") }
+    if ($global:IncludeInscripciones) { $directories += (Join-Path $FRONTEND_DIR "src\modules\inscripciones") }
 
     foreach ($dir in $directories) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -453,61 +462,102 @@ def get_db() -> Generator[Session, None, None]:
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca005_db\session.py") -Content $content_session
 
-    $content_models = @'
+    $content_models = @"
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, CheckConstraint
 from sqlalchemy.orm import relationship
 from .database import Base
 
 class Usuario(Base):
-    __tablename__ = "usuarios"
+    __tablename__ = `"usuarios`"
     id = Column(Integer, primary_key=True, index=True)
     correo = Column(String, unique=True, nullable=False)
     contrasena_hash = Column(String, nullable=False)
     rol = Column(String, nullable=False)
     activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, default=datetime.utcnow)
-    __table_args__ = (CheckConstraint("rol IN ('docente', 'administrador')", name="ck_usuario_rol"),)
+    __table_args__ = (CheckConstraint(`"rol IN ('docente', 'administrador')`", name=`"ck_usuario_rol`"),)
 
+$([string]::Empty)
+"@
+    
+    if ($global:IncludeDocentes) {
+        $content_models += @"
 class Docente(Base):
-    __tablename__ = "docentes"
+    __tablename__ = `"docentes`"
     id = Column(Integer, primary_key=True, index=True)
-    usuario_id = Column(Integer, ForeignKey("usuarios.id"), unique=True, nullable=True)
+    usuario_id = Column(Integer, ForeignKey(`"usuarios.id`"), unique=True, nullable=True)
     nombre = Column(String, nullable=False)
     correo = Column(String, nullable=False)
     especialidad = Column(String, nullable=True)
-    usuario = relationship("Usuario")
-    cursos = relationship("Curso", back_populates="docente")
+    usuario = relationship(`"Usuario`")
+$([string]::Empty)
+"@
+        if ($global:IncludeCursos) {
+            $content_models += "    cursos = relationship(`"Curso`", back_populates=`"docente`")`n"
+        }
+    }
 
+    if ($global:IncludeEstudiantes) {
+        $content_models += @"
 class Estudiante(Base):
-    __tablename__ = "estudiantes"
+    __tablename__ = `"estudiantes`"
     id = Column(Integer, primary_key=True, index=True)
     nombre = Column(String, nullable=False)
     codigo = Column(String, unique=True, nullable=False)
     correo = Column(String, nullable=False)
     datos_contacto = Column(String, nullable=True)
-    inscripciones = relationship("Inscripcion", back_populates="estudiante")
+$([string]::Empty)
+"@
+        if ($global:IncludeInscripciones) {
+            $content_models += "    inscripciones = relationship(`"Inscripcion`", back_populates=`"estudiante`")`n"
+        }
+    }
 
+    if ($global:IncludeCursos) {
+        $content_models += @"
 class Curso(Base):
-    __tablename__ = "cursos"
+    __tablename__ = `"cursos`"
     id = Column(Integer, primary_key=True, index=True)
     nombre = Column(String, nullable=False)
-    docente_id = Column(Integer, ForeignKey("docentes.id"), nullable=False)
     periodo_academico = Column(String, nullable=False)
-    docente = relationship("Docente", back_populates="cursos")
-    inscripciones = relationship("Inscripcion", back_populates="curso")
+$([string]::Empty)
+"@
+        if ($global:IncludeDocentes) {
+            $content_models += "    docente_id = Column(Integer, ForeignKey(`"docentes.id`"), nullable=False)`n"
+            $content_models += "    docente = relationship(`"Docente`", back_populates=`"cursos`")`n"
+        } else {
+            $content_models += "    docente_id = Column(Integer, nullable=True) # Sin fk porque no hay docentes`n"
+        }
+        if ($global:IncludeInscripciones) {
+            $content_models += "    inscripciones = relationship(`"Inscripcion`", back_populates=`"curso`")`n"
+        }
+    }
 
+    if ($global:IncludeInscripciones) {
+        $content_models += @"
 class Inscripcion(Base):
-    __tablename__ = "inscripciones"
+    __tablename__ = `"inscripciones`"
     id = Column(Integer, primary_key=True, index=True)
-    estudiante_id = Column(Integer, ForeignKey("estudiantes.id"), nullable=False)
-    curso_id = Column(Integer, ForeignKey("cursos.id"), nullable=False)
     fecha_inscripcion = Column(DateTime, default=datetime.utcnow)
     estado = Column(String, nullable=False)
-    __table_args__ = (CheckConstraint("estado IN ('activa', 'cerrada', 'cupo_lleno')", name="ck_inscripcion_estado"),)
-    estudiante = relationship("Estudiante", back_populates="inscripciones")
-    curso = relationship("Curso", back_populates="inscripciones")
-'@
+    __table_args__ = (CheckConstraint(`"estado IN ('activa', 'cerrada', 'cupo_lleno')`", name=`"ck_inscripcion_estado`"),)
+$([string]::Empty)
+"@
+        if ($global:IncludeEstudiantes) {
+            $content_models += "    estudiante_id = Column(Integer, ForeignKey(`"estudiantes.id`"), nullable=False)`n"
+            $content_models += "    estudiante = relationship(`"Estudiante`", back_populates=`"inscripciones`")`n"
+        } else {
+            $content_models += "    estudiante_id = Column(Integer, nullable=True) # Sin fk porque no hay estudiantes`n"
+        }
+        if ($global:IncludeCursos) {
+            $content_models += "    curso_id = Column(Integer, ForeignKey(`"cursos.id`"), nullable=False)`n"
+            $content_models += "    curso = relationship(`"Curso`", back_populates=`"inscripciones`")`n"
+        } else {
+            $content_models += "    curso_id = Column(Integer, nullable=True) # Sin fk porque no hay cursos`n"
+        }
+    }
+
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca005_db\models.py") -Content $content_models
 
     # CA-001 - Auth
@@ -594,7 +644,7 @@ def login(datos: LoginRequest, db: Session = Depends(get_db)):
     # CA-002 - Usuarios
     Write-Host ""
     Write-Host "--- CA-002: Archivos de gestion de usuarios ---" -ForegroundColor Cyan
-    $content_usr_schemas = @'
+    $content_usr_schemas = @"
 from typing import Optional
 from pydantic import BaseModel
 
@@ -610,7 +660,11 @@ class UsuarioResponse(BaseModel):
     activo: bool
     class Config:
         from_attributes = True
-
+$([string]::Empty)
+"@
+    
+    if ($global:IncludeEstudiantes) {
+        $content_usr_schemas += @"
 class EstudianteCreate(BaseModel):
     nombre: str
     codigo: str
@@ -621,7 +675,12 @@ class EstudianteResponse(EstudianteCreate):
     id: int
     class Config:
         from_attributes = True
+$([string]::Empty)
+"@
+    }
 
+    if ($global:IncludeDocentes) {
+        $content_usr_schemas += @"
 class DocenteCreate(BaseModel):
     nombre: str
     correo: str
@@ -632,18 +691,21 @@ class DocenteResponse(DocenteCreate):
     id: int
     class Config:
         from_attributes = True
-'@
+$([string]::Empty)
+"@
+    }
+
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\schemas.py") -Content $content_usr_schemas
 
-    $content_usr_services = @'
+    $content_usr_services = @"
 from typing import Optional
 from sqlalchemy.orm import Session
-from .schemas import UsuarioCreate, EstudianteCreate, DocenteCreate
-from core.ca005_db.models import Usuario, Estudiante, Docente
+from . import schemas
+from core.ca005_db import models
 from core.ca001_auth.security import get_password_hash
 
-def crear_usuario(db: Session, datos: UsuarioCreate):
-    nuevo_usuario = Usuario(
+def crear_usuario(db: Session, datos: schemas.UsuarioCreate):
+    nuevo_usuario = models.Usuario(
         correo=datos.correo,
         contrasena_hash=get_password_hash(datos.contrasena),
         rol=datos.rol
@@ -654,37 +716,49 @@ def crear_usuario(db: Session, datos: UsuarioCreate):
     return nuevo_usuario
 
 def listar_usuarios(db: Session):
-    return db.query(Usuario).all()
-
-def crear_estudiante(db: Session, datos: EstudianteCreate):
-    nuevo = Estudiante(**datos.dict())
+    return db.query(models.Usuario).all()
+$([string]::Empty)
+"@
+    
+    if ($global:IncludeEstudiantes) {
+        $content_usr_services += @"
+def crear_estudiante(db: Session, datos: schemas.EstudianteCreate):
+    nuevo = models.Estudiante(**datos.dict())
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
     return nuevo
 
 def listar_estudiantes(db: Session, filtro: Optional[str] = None):
-    query = db.query(Estudiante)
+    query = db.query(models.Estudiante)
     if filtro:
-        query = query.filter(Estudiante.nombre.ilike(f"%{filtro}%"))
+        query = query.filter(models.Estudiante.nombre.ilike(f`"%{filtro}%`"))
     return query.all()
+$([string]::Empty)
+"@
+    }
 
-def crear_docente(db: Session, datos: DocenteCreate):
-    nuevo = Docente(**datos.dict())
+    if ($global:IncludeDocentes) {
+        $content_usr_services += @"
+def crear_docente(db: Session, datos: schemas.DocenteCreate):
+    nuevo = models.Docente(**datos.dict())
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
     return nuevo
 
 def listar_docentes(db: Session, filtro: Optional[str] = None):
-    query = db.query(Docente)
+    query = db.query(models.Docente)
     if filtro:
-        query = query.filter(Docente.nombre.ilike(f"%{filtro}%"))
+        query = query.filter(models.Docente.nombre.ilike(f`"%{filtro}%`"))
     return query.all()
-'@
+$([string]::Empty)
+"@
+    }
+
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\services.py") -Content $content_usr_services
 
-    $content_usr_router = @'
+    $content_usr_router = @"
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from typing import List
@@ -693,38 +767,50 @@ from core.ca005_db.session import get_db
 from core.ca003_roles.dependencies import requiere_rol
 from core.ca009_auditoria.services import registrar_auditoria
 
-router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
+router = APIRouter(prefix=`"/usuarios`", tags=[`"Usuarios`"])
 
-@router.get("/", response_model=List[schemas.UsuarioResponse])
-def listar_usuarios(db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+@router.get(`"/`", response_model=List[schemas.UsuarioResponse])
+def listar_usuarios(db: Session = Depends(get_db), token = Depends(requiere_rol(`"administrador`"))):
     return services.listar_usuarios(db)
 
-@router.post("/", response_model=schemas.UsuarioResponse)
-def crear_usuario(datos: schemas.UsuarioCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+@router.post(`"/`", response_model=schemas.UsuarioResponse)
+def crear_usuario(datos: schemas.UsuarioCreate, db: Session = Depends(get_db), token = Depends(requiere_rol(`"administrador`"))):
     nuevo = services.crear_usuario(db, datos)
-    registrar_auditoria(db, usuario=token.sub, recurso="usuario", accion="crear", valores_nuevos={"correo": nuevo.correo, "rol": nuevo.rol})
+    registrar_auditoria(db, usuario=token.sub, recurso=`"usuario`", accion=`"crear`", valores_nuevos={`"correo`": nuevo.correo, `"rol`": nuevo.rol})
     return nuevo
-
-@router.get("/estudiantes", response_model=List[schemas.EstudianteResponse])
-def listar_estudiantes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
+$([string]::Empty)
+"@
+    
+    if ($global:IncludeEstudiantes) {
+        $content_usr_router += @"
+@router.get(`"/estudiantes`", response_model=List[schemas.EstudianteResponse])
+def listar_estudiantes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol(`"administrador`", `"docente`"))):
     return services.listar_estudiantes(db, filtro)
 
-@router.post("/estudiantes", response_model=schemas.EstudianteResponse)
-def crear_estudiante(datos: schemas.EstudianteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+@router.post(`"/estudiantes`", response_model=schemas.EstudianteResponse)
+def crear_estudiante(datos: schemas.EstudianteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol(`"administrador`"))):
     nuevo = services.crear_estudiante(db, datos)
-    registrar_auditoria(db, usuario=token.sub, recurso="estudiante", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "codigo": nuevo.codigo})
+    registrar_auditoria(db, usuario=token.sub, recurso=`"estudiante`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"codigo`": nuevo.codigo})
     return nuevo
+$([string]::Empty)
+"@
+    }
 
-@router.get("/docentes", response_model=List[schemas.DocenteResponse])
-def listar_docentes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador", "docente"))):
+    if ($global:IncludeDocentes) {
+        $content_usr_router += @"
+@router.get(`"/docentes`", response_model=List[schemas.DocenteResponse])
+def listar_docentes(filtro: str = None, db: Session = Depends(get_db), token = Depends(requiere_rol(`"administrador`", `"docente`"))):
     return services.listar_docentes(db, filtro)
 
-@router.post("/docentes", response_model=schemas.DocenteResponse)
-def crear_docente(datos: schemas.DocenteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol("administrador"))):
+@router.post(`"/docentes`", response_model=schemas.DocenteResponse)
+def crear_docente(datos: schemas.DocenteCreate, db: Session = Depends(get_db), token = Depends(requiere_rol(`"administrador`"))):
     nuevo = services.crear_docente(db, datos)
-    registrar_auditoria(db, usuario=token.sub, recurso="docente", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "correo": nuevo.correo})
+    registrar_auditoria(db, usuario=token.sub, recurso=`"docente`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"correo`": nuevo.correo})
     return nuevo
-'@
+$([string]::Empty)
+"@
+    }
+
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca002_usuarios\router.py") -Content $content_usr_router
 
     # CA-003 - Roles
@@ -765,7 +851,7 @@ def requiere_rol(*roles: str):
     # CA-006 - GraphQL
     Write-Host ""
     Write-Host "--- CA-006: Archivos de GraphQL ---" -ForegroundColor Cyan
-    $content_gql_types = @'
+    $content_gql_types = @"
 import strawberry
 from typing import Optional
 
@@ -777,12 +863,32 @@ class UsuarioType:
     activo: bool
 
 @strawberry.type
+class AuthPayload:
+    token: str
+    usuario: UsuarioType
+$([string]::Empty)
+"@
+    
+    if ($global:IncludeDocentes) {
+        $content_gql_types += @"
+@strawberry.type
 class DocenteType:
     id: int
     nombre: str
     correo: str
     especialidad: Optional[str] = None
 
+@strawberry.input
+class DocenteInput:
+    nombre: str
+    correo: str
+    especialidad: Optional[str] = None
+$([string]::Empty)
+"@
+    }
+
+    if ($global:IncludeEstudiantes) {
+        $content_gql_types += @"
 @strawberry.type
 class EstudianteType:
     id: int
@@ -791,162 +897,228 @@ class EstudianteType:
     correo: str
     datos_contacto: Optional[str] = None
 
-@strawberry.type
-class CursoType:
-    id: int
-    nombre: str
-    docente_id: int
-    periodo_academico: str
-
-@strawberry.type
-class InscripcionType:
-    id: int
-    estudiante_id: int
-    curso_id: int
-    estado: str
-
-@strawberry.type
-class AuthPayload:
-    token: str
-    usuario: UsuarioType
-
 @strawberry.input
 class EstudianteInput:
     nombre: str
     codigo: str
     correo: str
     datos_contacto: Optional[str] = None
+$([string]::Empty)
+"@
+    }
 
-@strawberry.input
-class DocenteInput:
+    if ($global:IncludeCursos) {
+        $content_gql_types += @"
+@strawberry.type
+class CursoType:
+    id: int
     nombre: str
-    correo: str
-    especialidad: Optional[str] = None
-
+    periodo_academico: str
+$([string]::Empty)
+"@
+        if ($global:IncludeDocentes) {
+            $content_gql_types += "    docente_id: int`n"
+        } else {
+            $content_gql_types += "    docente_id: Optional[int] = None`n"
+        }
+        
+        $content_gql_types += @"
 @strawberry.input
 class CursoInput:
     nombre: str
-    docente_id: int
     periodo_academico: str
+$([string]::Empty)
+"@
+        if ($global:IncludeDocentes) {
+            $content_gql_types += "    docente_id: int`n"
+        } else {
+            $content_gql_types += "    docente_id: Optional[int] = None`n"
+        }
+    }
 
+    if ($global:IncludeInscripciones) {
+        $content_gql_types += @"
+@strawberry.type
+class InscripcionType:
+    id: int
+    estado: str
+$([string]::Empty)
+"@
+        if ($global:IncludeEstudiantes) { $content_gql_types += "    estudiante_id: int`n" } else { $content_gql_types += "    estudiante_id: Optional[int] = None`n" }
+        if ($global:IncludeCursos) { $content_gql_types += "    curso_id: int`n" } else { $content_gql_types += "    curso_id: Optional[int] = None`n" }
+
+        $content_gql_types += @"
 @strawberry.input
 class InscripcionInput:
-    estudiante_id: int
-    curso_id: int
-    estado: str = "activa"
-'@
+    estado: str = `"activa`"
+$([string]::Empty)
+"@
+        if ($global:IncludeEstudiantes) { $content_gql_types += "    estudiante_id: int`n" } else { $content_gql_types += "    estudiante_id: Optional[int] = None`n" }
+        if ($global:IncludeCursos) { $content_gql_types += "    curso_id: int`n" } else { $content_gql_types += "    curso_id: Optional[int] = None`n" }
+    }
+
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\types.py") -Content $content_gql_types
 
-    $content_gql_schema = @'
+    $content_gql_schema = @"
 import strawberry
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types import Info
 from typing import Optional, List
 from core.ca008_errores.graphql_errors import AcademicoSchema
-from .types import (
-    UsuarioType, DocenteType, EstudianteType,
-    CursoType, InscripcionType, AuthPayload,
-    EstudianteInput, DocenteInput, CursoInput, InscripcionInput,
-)
-from core.ca005_db.models import Estudiante, Docente, Curso, Inscripcion, Usuario
+import core.ca006_graphql.types as types
+import core.ca005_db.models as models
 from core.ca001_auth.security import create_access_token, verify_password, verify_token
 from core.ca009_auditoria.services import registrar_auditoria
 
 def get_db_from_info(info: Info):
-    return info.context["db"]
+    return info.context[`"db`"]
 
 def get_usuario_actual(info: Info, *roles: str):
-    # No existe middleware global de autenticacion para GraphQL (a diferencia
-    # de REST, que usa requiere_rol de core.ca003_roles.dependencies); cada
-    # query/mutation que necesita proteger acceso o saber "quien" actua
-    # (para auditoria) llama a este helper, que valida el Authorization
-    # header manualmente y opcionalmente exige uno de los roles indicados.
-    request = info.context.get("request")
-    auth_header = request.headers.get("authorization") if request else None
-    if not auth_header or not auth_header.lower().startswith("bearer "):
-        raise Exception("No autorizado")
-    token = auth_header.split(" ", 1)[1]
+    request = info.context.get(`"request`")
+    auth_header = request.headers.get(`"authorization`") if request else None
+    if not auth_header or not auth_header.lower().startswith(`"bearer `"):
+        raise Exception(`"No autorizado`")
+    token = auth_header.split(`" `", 1)[1]
     usuario = verify_token(token)
     if roles and usuario.rol not in roles:
-        raise Exception("Permiso denegado")
+        raise Exception(`"Permiso denegado`")
     return usuario
 
 @strawberry.type
 class Query:
+    pass
+$([string]::Empty)
+"@
+    
+    if ($global:IncludeEstudiantes) {
+        $content_gql_schema += @"
     @strawberry.field
-    def estudiantes(self, info: Info, filtro: Optional[str] = None) -> List[EstudianteType]:
-        get_usuario_actual(info, "administrador", "docente")
+    def estudiantes(self, info: Info, filtro: Optional[str] = None) -> List[types.EstudianteType]:
+        get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
-        q = db.query(Estudiante)
-        if filtro: q = q.filter(Estudiante.nombre.ilike(f"%{filtro}%"))
+        q = db.query(models.Estudiante)
+        if filtro: q = q.filter(models.Estudiante.nombre.ilike(f`"%{filtro}%`"))
         return q.all()
+$([string]::Empty)
+"@
+    }
 
+    if ($global:IncludeDocentes) {
+        $content_gql_schema += @"
     @strawberry.field
-    def docentes(self, info: Info, filtro: Optional[str] = None) -> List[DocenteType]:
-        get_usuario_actual(info, "administrador", "docente")
+    def docentes(self, info: Info, filtro: Optional[str] = None) -> List[types.DocenteType]:
+        get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
-        q = db.query(Docente)
-        if filtro: q = q.filter(Docente.nombre.ilike(f"%{filtro}%"))
+        q = db.query(models.Docente)
+        if filtro: q = q.filter(models.Docente.nombre.ilike(f`"%{filtro}%`"))
         return q.all()
+$([string]::Empty)
+"@
+    }
 
+    if ($global:IncludeCursos) {
+        $content_gql_schema += @"
     @strawberry.field
-    def cursos(self, info: Info, filtro: Optional[str] = None) -> List[CursoType]:
-        get_usuario_actual(info, "administrador", "docente")
+    def cursos(self, info: Info, filtro: Optional[str] = None) -> List[types.CursoType]:
+        get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
-        return db.query(Curso).all()
+        return db.query(models.Curso).all()
+$([string]::Empty)
+"@
+    }
 
+    if ($global:IncludeInscripciones) {
+        $content_gql_schema += @"
     @strawberry.field
-    def inscripciones(self, info: Info, filtro: Optional[str] = None) -> List[InscripcionType]:
-        get_usuario_actual(info, "administrador", "docente")
+    def inscripciones(self, info: Info, filtro: Optional[str] = None) -> List[types.InscripcionType]:
+        get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
-        return db.query(Inscripcion).all()
+        return db.query(models.Inscripcion).all()
+$([string]::Empty)
+"@
+    }
 
+    $content_gql_schema += @"
 @strawberry.type
 class Mutation:
     @strawberry.mutation
-    def login(self, info: Info, correo: str, contrasena: str) -> AuthPayload:
+    def login(self, info: Info, correo: str, contrasena: str) -> types.AuthPayload:
         db = get_db_from_info(info)
-        usuario = db.query(Usuario).filter(Usuario.correo == correo).first()
+        usuario = db.query(models.Usuario).filter(models.Usuario.correo == correo).first()
         if not usuario or not verify_password(contrasena, usuario.contrasena_hash):
-            raise Exception("Credenciales invalidas")
-        token = create_access_token(data={"sub": usuario.correo}, rol=usuario.rol)
-        return AuthPayload(token=token, usuario=usuario)
+            raise Exception(`"Credenciales invalidas`")
+        token = create_access_token(data={`"sub`": usuario.correo}, rol=usuario.rol)
+        return types.AuthPayload(token=token, usuario=usuario)
+$([string]::Empty)
+"@
 
+    if ($global:IncludeEstudiantes) {
+        $content_gql_schema += @"
     @strawberry.mutation
-    def crear_estudiante(self, info: Info, datos: EstudianteInput) -> EstudianteType:
-        usuario = get_usuario_actual(info, "administrador")
+    def crear_estudiante(self, info: Info, datos: types.EstudianteInput) -> types.EstudianteType:
+        usuario = get_usuario_actual(info, `"administrador`")
         db = get_db_from_info(info)
-        nuevo = Estudiante(**datos.__dict__)
+        nuevo = models.Estudiante(**datos.__dict__)
         db.add(nuevo)
         db.commit()
         db.refresh(nuevo)
-        registrar_auditoria(db, usuario=usuario.sub, recurso="estudiante", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "codigo": nuevo.codigo})
+        registrar_auditoria(db, usuario=usuario.sub, recurso=`"estudiante`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"codigo`": nuevo.codigo})
         return nuevo
+$([string]::Empty)
+"@
+    }
 
+    if ($global:IncludeCursos) {
+        $content_gql_schema += @"
     @strawberry.mutation
-    def crear_curso(self, info: Info, datos: CursoInput) -> CursoType:
-        usuario = get_usuario_actual(info, "administrador")
+    def crear_curso(self, info: Info, datos: types.CursoInput) -> types.CursoType:
+        usuario = get_usuario_actual(info, `"administrador`")
         db = get_db_from_info(info)
-        nuevo = Curso(**datos.__dict__)
+        nuevo = models.Curso(**datos.__dict__)
         db.add(nuevo)
         db.commit()
         db.refresh(nuevo)
-        registrar_auditoria(db, usuario=usuario.sub, recurso="curso", accion="crear", valores_nuevos={"nombre": nuevo.nombre, "periodo_academico": nuevo.periodo_academico})
+        registrar_auditoria(db, usuario=usuario.sub, recurso=`"curso`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"periodo_academico`": nuevo.periodo_academico})
         return nuevo
+$([string]::Empty)
+"@
+    }
 
+    if ($global:IncludeInscripciones) {
+        $content_gql_schema += @"
     @strawberry.mutation
-    def crear_inscripcion(self, info: Info, datos: InscripcionInput) -> InscripcionType:
-        usuario = get_usuario_actual(info, "administrador", "docente")
+    def crear_inscripcion(self, info: Info, datos: types.InscripcionInput) -> types.InscripcionType:
+        usuario = get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
-        nueva = Inscripcion(**datos.__dict__)
+        nueva = models.Inscripcion(**datos.__dict__)
         db.add(nueva)
         db.commit()
         db.refresh(nueva)
-        registrar_auditoria(db, usuario=usuario.sub, recurso="inscripcion", accion="crear", valores_nuevos={"estudiante_id": nueva.estudiante_id, "curso_id": nueva.curso_id, "estado": nueva.estado})
+        registrar_auditoria(db, usuario=usuario.sub, recurso=`"inscripcion`", accion=`"crear`", valores_nuevos={`"estudiante_id`": nueva.estudiante_id, `"curso_id`": nueva.curso_id, `"estado`": nueva.estado})
         return nueva
+$([string]::Empty)
+"@
+    }
 
+    if ($global:IncludeDocentes) {
+        $content_gql_schema += @"
+    @strawberry.mutation
+    def crear_docente(self, info: Info, datos: types.DocenteInput) -> types.DocenteType:
+        usuario = get_usuario_actual(info, `"administrador`")
+        db = get_db_from_info(info)
+        nuevo = models.Docente(**datos.__dict__)
+        db.add(nuevo)
+        db.commit()
+        db.refresh(nuevo)
+        registrar_auditoria(db, usuario=usuario.sub, recurso=`"docente`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"correo`": nuevo.correo})
+        return nuevo
+$([string]::Empty)
+"@
+    }
+
+    $content_gql_schema += @"
 schema = AcademicoSchema(query=Query, mutation=Mutation, config=StrawberryConfig(auto_camel_case=False))
-'@
+"@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\schema.py") -Content $content_gql_schema
 
     # CA-007 - Validaciones Comunes
@@ -1812,22 +1984,56 @@ export const client = new ApolloClient({
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\graphql\client.js") -Content $content_fe_client
 
-    $content_fe_ops = @'
-import { gql } from "@apollo/client";
+    $content_fe_ops = @"
+import { gql } from `"@apollo/client`";
 
-export const LOGIN_MUTATION = gql`
-  mutation Login($correo: String!, $contrasena: String!) {
-    login(correo: $correo, contrasena: $contrasena) {
+export const LOGIN_MUTATION = gql``
+  mutation Login(`$correo: String!, `$contrasena: String!) {
+    login(correo: `$correo, contrasena: `$contrasena) {
       token
       usuario { id correo rol }
     }
   }
-`;
-
-export const GET_ESTUDIANTES = gql`
+``;
+$([string]::Empty)
+"@
+    
+    if ($global:IncludeEstudiantes) {
+        $content_fe_ops += @"
+export const GET_ESTUDIANTES = gql``
   query GetEstudiantes { estudiantes { id nombre codigo correo } }
-`;
-'@
+``;
+$([string]::Empty)
+"@
+    }
+
+    if ($global:IncludeDocentes) {
+        $content_fe_ops += @"
+export const GET_DOCENTES = gql``
+  query GetDocentes { docentes { id nombre correo especialidad } }
+``;
+$([string]::Empty)
+"@
+    }
+
+    if ($global:IncludeCursos) {
+        $content_fe_ops += @"
+export const GET_CURSOS = gql``
+  query GetCursos { cursos { id nombre periodo_academico docente_id } }
+``;
+$([string]::Empty)
+"@
+    }
+
+    if ($global:IncludeInscripciones) {
+        $content_fe_ops += @"
+export const GET_INSCRIPCIONES = gql``
+  query GetInscripciones { inscripciones { id estado estudiante_id curso_id } }
+``;
+$([string]::Empty)
+"@
+    }
+
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\graphql\operations.js") -Content $content_fe_ops
 
     $content_fe_theme = @'
@@ -2193,12 +2399,14 @@ export default function Layout() {
   const { user, logout } = useAuth();
   if (!user) return <Outlet />;
 
-  const menu = [
-    { index: "01", text: "Estudiantes", path: "/estudiantes" },
-    { index: "02", text: "Docentes", path: "/docentes" },
-    { index: "03", text: "Cursos", path: "/cursos" },
-    { index: "04", text: "Inscripciones", path: "/inscripciones" },
-  ];
+  const menu = [];
+'@
+    if ($global:IncludeEstudiantes) { $content_fe_layout += "  if (user?.rol === 'administrador') menu.push({ index: '01', text: 'Estudiantes', path: '/estudiantes' });`n" }
+    if ($global:IncludeDocentes) { $content_fe_layout += "  if (user?.rol === 'administrador') menu.push({ index: '02', text: 'Docentes', path: '/docentes' });`n" }
+    if ($global:IncludeCursos) { $content_fe_layout += "  menu.push({ index: '03', text: 'Cursos', path: '/cursos' });`n" }
+    if ($global:IncludeInscripciones) { $content_fe_layout += "  menu.push({ index: '04', text: 'Inscripciones', path: '/inscripciones' });`n" }
+
+    $content_fe_layout += @'
 
   return (
     <Box sx={{ display: "flex" }}>
@@ -2361,18 +2569,20 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 '@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\main.jsx") -Content $content_fe_main
 
-    $content_fe_inicio = @'
-import { Box, Typography, Paper } from "@mui/material";
-import { useNavigate } from "react-router-dom";
-import { useAuth } from "../../auth/AuthContext";
-import { academic } from "../../theme";
+    $content_fe_inicio = @"
+import { Box, Typography, Paper } from `"@mui/material`";
+import { useNavigate } from `"react-router-dom`";
+import { useAuth } from `"../../auth/AuthContext`";
+import { academic } from `"../../theme`";
 
-const SECCIONES = [
-  { index: "01", text: "Estudiantes", path: "/estudiantes", desc: "Matricula y datos de contacto" },
-  { index: "02", text: "Docentes", path: "/docentes", desc: "Planta docente y especialidades" },
-  { index: "03", text: "Cursos", path: "/cursos", desc: "Oferta academica por periodo" },
-  { index: "04", text: "Inscripciones", path: "/inscripciones", desc: "Movimientos de matricula" },
-];
+const SECCIONES = [];
+$([string]::Empty)
+"@
+    if ($global:IncludeEstudiantes) { $content_fe_inicio += "SECCIONES.push({ index: `"01`", text: `"Estudiantes`", path: `"/estudiantes`", desc: `"Matricula y datos de contacto`", roles: [`"administrador`"] });`n" }
+    if ($global:IncludeDocentes) { $content_fe_inicio += "SECCIONES.push({ index: `"02`", text: `"Docentes`", path: `"/docentes`", desc: `"Planta docente y especialidades`", roles: [`"administrador`"] });`n" }
+    if ($global:IncludeCursos) { $content_fe_inicio += "SECCIONES.push({ index: `"03`", text: `"Cursos`", path: `"/cursos`", desc: `"Oferta academica por periodo`", roles: [`"administrador`", `"docente`"] });`n" }
+    if ($global:IncludeInscripciones) { $content_fe_inicio += "SECCIONES.push({ index: `"04`", text: `"Inscripciones`", path: `"/inscripciones`", desc: `"Movimientos de matricula`", roles: [`"administrador`", `"docente`"] });`n" }
+    $content_fe_inicio += @"
 
 export default function InicioPage() {
   const { user } = useAuth();
@@ -2380,36 +2590,36 @@ export default function InicioPage() {
 
   return (
     <Box>
-      <Typography variant="overline" sx={{ color: academic.gold, fontWeight: 500 }}>
+      <Typography variant=`"overline`" sx={{ color: academic.gold, fontWeight: 500 }}>
         Panel principal
       </Typography>
-      <Typography variant="h3" sx={{ mt: 0.5 }}>
+      <Typography variant=`"h3`" sx={{ mt: 0.5 }}>
         Bienvenido
       </Typography>
-      <Typography variant="subtitle1" sx={{ mt: 0.5, mb: 4 }}>
+      <Typography variant=`"subtitle1`" sx={{ mt: 0.5, mb: 4 }}>
         Sesion iniciada como <strong>{user?.correo}</strong> &middot; rol {user?.rol}
       </Typography>
 
-      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
-        {SECCIONES.map((s) => (
+      <Box sx={{ display: `"grid`", gridTemplateColumns: { xs: `"1fr`", sm: `"1fr 1fr`" }, gap: 2 }}>
+        {SECCIONES.filter(s => s.roles.includes(user?.rol)).map((s) => (
           <Paper
             key={s.path}
-            variant="outlined"
+            variant=`"outlined`"
             onClick={() => navigate(s.path)}
             sx={{
               p: 2.5,
-              cursor: "pointer",
-              transition: "border-color 0.15s ease",
-              "&:hover": { borderColor: academic.gold },
+              cursor: `"pointer`",
+              transition: `"border-color 0.15s ease`",
+              `"&:hover`": { borderColor: academic.gold },
             }}
           >
             <Typography
-              sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.75rem", color: academic.gold }}
+              sx={{ fontFamily: '`"IBM Plex Mono`", monospace', fontSize: `"0.75rem`", color: academic.gold }}
             >
               {s.index}
             </Typography>
-            <Typography variant="h6" sx={{ mt: 0.5 }}>{s.text}</Typography>
-            <Typography variant="body2" sx={{ color: "text.secondary", mt: 0.25 }}>
+            <Typography variant=`"h6`" sx={{ mt: 0.5 }}>{s.text}</Typography>
+            <Typography variant=`"body2`" sx={{ color: `"text.secondary`", mt: 0.25 }}>
               {s.desc}
             </Typography>
           </Paper>
@@ -2418,41 +2628,47 @@ export default function InicioPage() {
     </Box>
   );
 }
-'@
+"@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inicio\InicioPage.jsx") -Content $content_fe_inicio
 
-    $content_fe_app = @'
-import { Routes, Route, Navigate } from "react-router-dom";
-import LoginPage from "./auth/LoginPage";
-import Layout from "./design-system/components/Layout";
-import InicioPage from "./modules/inicio/InicioPage";
-import EstudiantesPage from "./modules/estudiantes/EstudiantesPage";
-import DocentesPage from "./modules/docentes/DocentesPage";
-import CursosPage from "./modules/cursos/CursosPage";
-import InscripcionesPage from "./modules/inscripciones/InscripcionesPage";
-import { useAuth } from "./auth/AuthContext";
+    $content_fe_app = @"
+import { Routes, Route, Navigate } from `"react-router-dom`";
+import LoginPage from `"./auth/LoginPage`";
+import Layout from `"./design-system/components/Layout`";
+import InicioPage from `"./modules/inicio/InicioPage`";
+$([string]::Empty)
+"@
+    if ($global:IncludeEstudiantes) { $content_fe_app += "import EstudiantesPage from `"./modules/estudiantes/EstudiantesPage`";`n" }
+    if ($global:IncludeDocentes) { $content_fe_app += "import DocentesPage from `"./modules/docentes/DocentesPage`";`n" }
+    if ($global:IncludeCursos) { $content_fe_app += "import CursosPage from `"./modules/cursos/CursosPage`";`n" }
+    if ($global:IncludeInscripciones) { $content_fe_app += "import InscripcionesPage from `"./modules/inscripciones/InscripcionesPage`";`n" }
+    $content_fe_app += @"
+import { useAuth } from `"./auth/AuthContext`";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
   if (loading) return null;
-  return user ? children : <Navigate to="/login" />;
+  return user ? children : <Navigate to=`"/login`" />;
 }
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/" element={<Protected><Layout /></Protected>}>
+      <Route path=`"/login`" element={<LoginPage />} />
+      <Route path=`"/`" element={<Protected><Layout /></Protected>}>
         <Route index element={<InicioPage />} />
-        <Route path="estudiantes" element={<EstudiantesPage />} />
-        <Route path="docentes" element={<DocentesPage />} />
-        <Route path="cursos" element={<CursosPage />} />
-        <Route path="inscripciones" element={<InscripcionesPage />} />
+$([string]::Empty)
+"@
+    if ($global:IncludeEstudiantes) { $content_fe_app += "        <Route path=`"estudiantes`" element={<EstudiantesPage />} />`n" }
+    if ($global:IncludeDocentes) { $content_fe_app += "        <Route path=`"docentes`" element={<DocentesPage />} />`n" }
+    if ($global:IncludeCursos) { $content_fe_app += "        <Route path=`"cursos`" element={<CursosPage />} />`n" }
+    if ($global:IncludeInscripciones) { $content_fe_app += "        <Route path=`"inscripciones`" element={<InscripcionesPage />} />`n" }
+    $content_fe_app += @"
       </Route>
     </Routes>
   );
 }
-'@
+"@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\App.jsx") -Content $content_fe_app
 
     # --- Frontend: Docentes, Cursos, Inscripciones ---
@@ -2461,9 +2677,9 @@ import { useQuery, gql } from "@apollo/client";
 import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
 import PageHeader from "../../design-system/components/PageHeader";
 
-const GET_DOCENTES = gql`
+const GET_DOCENTES = gql``
   query { docentes { id nombre correo especialidad } }
-`;
+``;
 
 export default function DocentesPage() {
   const { data, loading, error } = useQuery(GET_DOCENTES);
@@ -2643,7 +2859,12 @@ si tiene menos, completa hasta 5 usando datos de ejemplo que no
 choquen con los que ya existan (correo/codigo/nombre unicos).
 """
 from core.ca005_db.database import SessionLocal, Base, engine
-from core.ca005_db.models import Usuario, Docente, Estudiante, Curso, Inscripcion
+from core.ca005_db.models import Usuario, Docente, Estudiante
+try:
+    from core.ca005_db.models import Curso, Inscripcion
+except ImportError:
+    Curso = None
+    Inscripcion = None
 from core.ca001_auth.security import get_password_hash
 
 Base.metadata.create_all(bind=engine)
@@ -2721,56 +2942,71 @@ db.commit()
 estudiantes_por_codigo = {e.codigo: e for e in db.query(Estudiante).all()}
 
 # --- Cursos ---
-cursos_candidatos = [
-    {"nombre": "Calculo I", "docente_correo": "garcia@academico.com", "periodo_academico": "2026-B"},
-    {"nombre": "Fisica I", "docente_correo": "maria.lopez@academico.com", "periodo_academico": "2026-B"},
-    {"nombre": "Programacion I", "docente_correo": "juan.perez@academico.com", "periodo_academico": "2026-B"},
-    {"nombre": "Quimica General", "docente_correo": "laura.sanchez@academico.com", "periodo_academico": "2026-A"},
-    {"nombre": "Historia Universal", "docente_correo": "diego.torres@academico.com", "periodo_academico": "2026-A"},
-]
-existentes = {c.nombre for c in db.query(Curso).all()}
-for c in cursos_candidatos:
-    if len(existentes) >= META:
-        break
-    if c["nombre"] in existentes:
-        continue
-    docente_id = docentes_por_correo[c["docente_correo"]].id
-    db.add(Curso(nombre=c["nombre"], docente_id=docente_id, periodo_academico=c["periodo_academico"]))
-    existentes.add(c["nombre"])
-    log(f"curso creado: {c['nombre']}")
-db.commit()
+if Curso:
+    cursos_candidatos = [
+        {"nombre": "Calculo I", "docente_correo": "garcia@academico.com", "periodo_academico": "2026-B"},
+        {"nombre": "Fisica I", "docente_correo": "maria.lopez@academico.com", "periodo_academico": "2026-B"},
+        {"nombre": "Programacion I", "docente_correo": "juan.perez@academico.com", "periodo_academico": "2026-B"},
+        {"nombre": "Quimica General", "docente_correo": "laura.sanchez@academico.com", "periodo_academico": "2026-A"},
+        {"nombre": "Historia Universal", "docente_correo": "diego.torres@academico.com", "periodo_academico": "2026-A"},
+    ]
+    existentes = {c.nombre for c in db.query(Curso).all()}
+    for c in cursos_candidatos:
+        if len(existentes) >= META:
+            break
+        if c["nombre"] in existentes:
+            continue
+        docente_id = docentes_por_correo[c["docente_correo"]].id
+        db.add(Curso(nombre=c["nombre"], docente_id=docente_id, periodo_academico=c["periodo_academico"]))
+        existentes.add(c["nombre"])
+        log(f"curso creado: {c['nombre']}")
+    db.commit()
 
-cursos_por_nombre = {c.nombre: c for c in db.query(Curso).all()}
+    cursos_por_nombre = {c.nombre: c for c in db.query(Curso).all()}
+else:
+    cursos_por_nombre = {}
 
 # --- Inscripciones (sin campo unico natural; se deduplica por par estudiante+curso) ---
-inscripciones_candidatas = [
-    {"estudiante_codigo": "C999", "curso_nombre": "Calculo I", "estado": "activa"},
-    {"estudiante_codigo": "A100", "curso_nombre": "Fisica I", "estado": "activa"},
-    {"estudiante_codigo": "E001", "curso_nombre": "Programacion I", "estado": "activa"},
-    {"estudiante_codigo": "E002", "curso_nombre": "Quimica General", "estado": "cupo_lleno"},
-    {"estudiante_codigo": "E003", "curso_nombre": "Historia Universal", "estado": "cerrada"},
-]
-filas_actuales = db.query(Inscripcion).all()
-pares_existentes = {(i.estudiante_id, i.curso_id) for i in filas_actuales}
-total_actual = len(filas_actuales)
-for c in inscripciones_candidatas:
-    if total_actual >= META:
-        break
-    est = estudiantes_por_codigo.get(c["estudiante_codigo"])
-    cur = cursos_por_nombre.get(c["curso_nombre"])
-    if not est or not cur or (est.id, cur.id) in pares_existentes:
-        continue
-    db.add(Inscripcion(estudiante_id=est.id, curso_id=cur.id, estado=c["estado"]))
-    pares_existentes.add((est.id, cur.id))
-    total_actual += 1
-    log(f"inscripcion creada: {c['estudiante_codigo']} -> {c['curso_nombre']} ({c['estado']})")
-db.commit()
+if Inscripcion:
+    inscripciones_candidatas = [
+        {"estudiante_codigo": "C999", "curso_nombre": "Calculo I", "estado": "activa"},
+        {"estudiante_codigo": "A100", "curso_nombre": "Fisica I", "estado": "activa"},
+        {"estudiante_codigo": "E001", "curso_nombre": "Programacion I", "estado": "activa"},
+        {"estudiante_codigo": "E002", "curso_nombre": "Quimica General", "estado": "cupo_lleno"},
+        {"estudiante_codigo": "E003", "curso_nombre": "Historia Universal", "estado": "cerrada"},
+    ]
+    filas_actuales = db.query(Inscripcion).all()
+    pares_existentes = {(i.estudiante_id, i.curso_id) for i in filas_actuales}
+    total_actual = len(filas_actuales)
+    for c in inscripciones_candidatas:
+        if total_actual >= META:
+            break
+        est = estudiantes_por_codigo.get(c["estudiante_codigo"])
+        cur = cursos_por_nombre.get(c["curso_nombre"])
+        if not est or not cur or (est.id, cur.id) in pares_existentes:
+            continue
+        db.add(Inscripcion(estudiante_id=est.id, curso_id=cur.id, estado=c["estado"]))
+        pares_existentes.add((est.id, cur.id))
+        total_actual += 1
+        log(f"inscripcion creada: {c['estudiante_codigo']} -> {c['curso_nombre']} ({c['estado']})")
+    db.commit()
 
 db.close()
 print("Siembra completada.")
 '@
     Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "seed_data.py") -Content $content_seed_data
-    Write-Host "  [OK] seed_data.py generado (ejecutar manualmente: cd backend; python seed_data.py)" -ForegroundColor Green
+    Write-Host "  [OK] seed_data.py generado" -ForegroundColor Green
+
+    if ($global:IncludeRolDocente) {
+        Write-Host "  [+] Ejecutando seed_data.py para agregar usuarios docentes..." -ForegroundColor Cyan
+        Push-Location $BACKEND_DIR
+        $oldErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        python -m pip install --quiet -r requirements.txt
+        python seed_data.py
+        $ErrorActionPreference = $oldErrorAction
+        Pop-Location
+    }
 
     # Resumen
     if ($skippedFiles.Count -gt 0) {
