@@ -89,6 +89,8 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 y reemplazar el valor de `JWT_SECRET_KEY` en `backend/.env`.
 
+Opcionalmente, `AUDIT_RETENTION_DAYS` (CA-009/CA-010) define cuantos dias se conservan los registros de auditoria antes de poder purgarlos; por defecto es `365` si no se define.
+
 ## 6. Levantar los servidores de desarrollo
 
 En una terminal, arrancar el backend (FastAPI + GraphQL):
@@ -115,7 +117,17 @@ correo:     admin@academico.com
 contrasena: admin123
 ```
 
-## 7. Datos de ejemplo (opcional)
+## 7. Funcionalidades de la aplicacion
+
+- **Autenticacion** (`/login`): inicio de sesion contra `admin@academico.com` / `admin123` (u otro usuario existente). El boton "Salir" revoca el token en el servidor (no solo lo borra del navegador), asi que no puede reutilizarse tras cerrar sesion.
+- **Registro publico** (`/registro`, enlazado desde el login): cualquiera puede crear una cuenta propia; siempre se crea con rol **docente** (crear administradores requiere que otro administrador lo haga despues desde la gestion de usuarios).
+- **Estudiantes, Docentes, Cursos e Inscripciones**: CRUD completo (crear, editar, eliminar) en las cuatro secciones del menu. Eliminar es una baja logica (el registro no se borra, se marca inactivo y desaparece de los listados). Los administradores pueden crear/editar/eliminar todo; los docentes pueden editar cursos (permiso especifico `actualizar_cursos` de CA-003) y crear/editar inscripciones, pero no eliminar nada ni crear estudiantes, docentes o cursos.
+- **Roles** (`/roles`, solo administrador): lista los roles del sistema y los permisos asociados a cada uno.
+- **Auditoria** (`/auditoria`, solo administrador): historial de acciones (quien hizo que, cuando), boton para exportarlo a CSV y boton para purgar registros mas antiguos que un numero de dias configurable (por defecto usa `AUDIT_RETENTION_DAYS`).
+
+Hacer clic en el titulo "SGA · Sistema de Gestion Academica" de la barra superior siempre vuelve al menu principal.
+
+## 8. Datos de ejemplo (opcional)
 
 Para poblar la base de datos con 5 registros de ejemplo por tabla (usuarios, docentes, estudiantes, cursos, inscripciones), correr:
 
@@ -126,7 +138,7 @@ python seed_data.py
 
 Es idempotente: se puede correr varias veces sin duplicar datos (se detiene al llegar a 5 filas por tabla).
 
-## 8. Alternativa: correr todo con Docker
+## 9. Alternativa: correr todo con Docker
 
 Si prefieres no instalar Python/Node/PostgreSQL localmente, podes levantar todo con Docker (requiere Docker Desktop corriendo):
 
@@ -150,7 +162,7 @@ Para bajar los contenedores:
 docker compose down
 ```
 
-## 9. Problemas comunes
+## 10. Problemas comunes
 
 **`password authentication failed for user postgres`**
 El `DB_PASSWORD` en `backend/.env` no coincide con la contrasena real de tu PostgreSQL. Verificarla (por ejemplo con pgAdmin) y actualizar `backend/.env`.
