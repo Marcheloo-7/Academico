@@ -375,20 +375,37 @@ function New-ProjectSkeleton {
     $skippedFiles = [System.Collections.ArrayList]::new()
 
     function Write-SkeletonFile {
-        param([string]$FilePath, [string]$Content)
-        if (Test-Path $FilePath) {
+        # -Force: sobrescribe el archivo aunque ya exista (guarda respaldo .bak).
+        # Se usa para archivos de infraestructura que DEBEN quedar actualizados,
+        # como core/ca005_db/database.py (creacion automatica de la BD).
+        param([string]$FilePath, [string]$Content, [switch]$Force)
+        if ((Test-Path $FilePath) -and (-not $Force)) {
             [void]$skippedFiles.Add($FilePath)
             Write-Host "  [OMITIDO] Ya existe: $FilePath" -ForegroundColor Yellow
+            return
         }
-        else {
-            $parentDir = Split-Path -Parent $FilePath
-            if (-not (Test-Path $parentDir)) {
-                New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
+
+        $parentDir = Split-Path -Parent $FilePath
+        if (-not (Test-Path $parentDir)) {
+            New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
+        }
+
+        if (Test-Path $FilePath) {
+            $actual = Get-Content -Path $FilePath -Raw
+            if ($actual.Trim() -eq $Content.Trim()) {
+                Write-Host "  [OK]      Ya actualizado: $FilePath" -ForegroundColor Green
+                return
             }
+            Copy-Item -Path $FilePath -Destination "$FilePath.bak" -Force
             Set-Content -Path $FilePath -Value $Content -Encoding utf8
             [void]$createdFiles.Add($FilePath)
-            Write-Host "  [CREADO]  $FilePath" -ForegroundColor Green
+            Write-Host "  [ACTUALIZADO] $FilePath (respaldo en $FilePath.bak)" -ForegroundColor Green
+            return
         }
+
+        Set-Content -Path $FilePath -Value $Content -Encoding utf8
+        [void]$createdFiles.Add($FilePath)
+        Write-Host "  [CREADO]  $FilePath" -ForegroundColor Green
     }
 
     Write-Host ""
@@ -466,15 +483,65 @@ function New-ProjectSkeleton {
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/academico_db")
+
+
+def ensure_database(url_str: str) -> None:
+    """Crea la base de datos si todavia no existe.
+
+    SQLAlchemy solo crea tablas (create_all), nunca la base de datos en si.
+    Aqui nos conectamos a la base administrativa "postgres" (que siempre
+    existe) y ejecutamos CREATE DATABASE si hace falta. CREATE DATABASE no
+    puede correr dentro de una transaccion, por eso se activa autocommit.
+    """
+    import psycopg2
+    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
+    url = make_url(url_str)
+    if not url.get_backend_name().startswith("postgresql"):
+        return
+
+    try:
+        conn = psycopg2.connect(
+            dbname="postgres",
+            user=url.username,
+            password=url.password,
+            host=url.host or "localhost",
+            port=url.port or 5432,
+        )
+    except psycopg2.OperationalError as exc:
+        print(f"[BD] No se pudo conectar al servidor PostgreSQL: {exc}")
+        raise
+
+    try:
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (url.database,))
+        if cur.fetchone() is None:
+            cur.execute(f'CREATE DATABASE "{url.database}"')
+            print(f"[BD] Base de datos '{url.database}' creada.")
+        else:
+            print(f"[BD] Base de datos '{url.database}' ya existe.")
+        cur.close()
+    finally:
+        conn.close()
+
+
+ensure_database(DATABASE_URL)
+
 engine = create_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 '@
-    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca005_db\database.py") -Content $content_database
+    # -Force: database.py es infraestructura critica (contiene ensure_database,
+    # que crea la BD automaticamente). Si se omitiera por ya existir, un proyecto
+    # generado con una version anterior del script seguiria fallando con
+    # 'database "academico_db" does not exist'.
+    Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca005_db\database.py") -Content $content_database -Force
 
     $content_session = @'
 from typing import Generator
@@ -3744,6 +3811,3 @@ print("Siembra completada.")
 }
 
 New-ProjectSkeleton
-
-
-
