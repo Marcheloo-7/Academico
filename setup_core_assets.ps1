@@ -14,8 +14,45 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 # Detener ante cualquier error
 $ErrorActionPreference = "Stop"
 
-# Directorio raÃ­z del proyecto (donde reside este script)
-$PROJECT_ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
+# FunciÃ³n auxiliar para preguntas interactivas s/n
+function Ask-YesNo {
+    param([string]$Prompt)
+    while ($true) {
+        $resp = Read-Host $Prompt
+        switch ($resp.ToLower()) {
+            "s" { return $true }
+            "n" { return $false }
+            default { Write-Host "  [!] Respuesta no valida. Ingrese 's' o 'n'." -ForegroundColor Yellow }
+        }
+    }
+}
+
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "  Generador de Linea de Productos de Software (SGA)" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+$useCurrentDir = Ask-YesNo "  Desea crear el nuevo producto en la ubicacion actual? (s/n)"
+
+if ($useCurrentDir) {
+    # Directorio raÃ­z del proyecto (donde reside este script)
+    $PROJECT_ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
+    Write-Host "  [OK] Usando ubicacion actual: $PROJECT_ROOT" -ForegroundColor Green
+} else {
+    $customPath = "C:\Users\Marcelo Chiriboga\Documentos\Octavo Semestre\Fabrica de Software\ProyectoIntegrador"
+    $projectName = Read-Host "  Ingrese el nombre de la carpeta para el nuevo producto"
+    $PROJECT_ROOT = Join-Path $customPath $projectName
+    
+    if (-not (Test-Path $PROJECT_ROOT)) {
+        New-Item -ItemType Directory -Force -Path $PROJECT_ROOT | Out-Null
+        Write-Host "  [OK] Directorio creado: $PROJECT_ROOT" -ForegroundColor Green
+    } else {
+        Write-Host "  [!] El directorio ya existe: $PROJECT_ROOT. Se instalara sobre este." -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
+
 $BACKEND_DIR = Join-Path $PROJECT_ROOT "backend"
 $FRONTEND_DIR = Join-Path $PROJECT_ROOT "frontend"
 
@@ -162,18 +199,7 @@ $envRolesHeader = @"
 "@
 Add-Content -Path $envFilePath -Value $envRolesHeader -Encoding UTF8
 
-# FunciÃ³n auxiliar para preguntas interactivas s/n
-function Ask-YesNo {
-    param([string]$Prompt)
-    while ($true) {
-        $resp = Read-Host $Prompt
-        switch ($resp.ToLower()) {
-            "s" { return $true }
-            "n" { return $false }
-            default { Write-Host "  [!] Respuesta no valida. Ingrese 's' o 'n'." -ForegroundColor Yellow }
-        }
-    }
-}
+
 
 # --- Rol: Administrador ---
 Add-Content -Path $envFilePath -Value "ROLE_ADMIN=administrador" -Encoding UTF8
@@ -401,6 +427,7 @@ function New-ProjectSkeleton {
         (Join-Path $FRONTEND_DIR "src\graphql"),
         (Join-Path $FRONTEND_DIR "src\utils"),
         (Join-Path $FRONTEND_DIR "src\errors"),
+        (Join-Path $FRONTEND_DIR "src\assets"),
         (Join-Path $PROJECT_ROOT ".github\workflows")
     )
     if ($global:IncludeEstudiantes) { $directories += (Join-Path $FRONTEND_DIR "src\modules\estudiantes") }
@@ -521,6 +548,8 @@ class Curso(Base):
     id = Column(Integer, primary_key=True, index=True)
     nombre = Column(String, nullable=False)
     periodo_academico = Column(String, nullable=False)
+    cupo_maximo = Column(Integer, nullable=False, default=30)
+    vigente = Column(Boolean, nullable=False, default=True)
 $([string]::Empty)
 "@
         if ($global:IncludeDocentes) {
@@ -853,7 +882,19 @@ def requiere_rol(*roles: str):
     Write-Host "--- CA-006: Archivos de GraphQL ---" -ForegroundColor Cyan
     $content_gql_types = @"
 import strawberry
-from typing import Optional
+from typing import Optional, List, TypeVar, Generic
+
+T = TypeVar("T")
+
+@strawberry.type
+class PageInfo:
+    total_count: int
+    has_next_page: bool
+
+@strawberry.type
+class Connection(Generic[T]):
+    items: List[T]
+    page_info: PageInfo
 
 @strawberry.type
 class UsuarioType:
@@ -914,6 +955,8 @@ class CursoType:
     id: int
     nombre: str
     periodo_academico: str
+    cupo_maximo: int
+    vigente: bool
 $([string]::Empty)
 "@
         if ($global:IncludeDocentes) {
@@ -927,6 +970,8 @@ $([string]::Empty)
 class CursoInput:
     nombre: str
     periodo_academico: str
+    cupo_maximo: int = 30
+    vigente: bool = True
 $([string]::Empty)
 "@
         if ($global:IncludeDocentes) {
@@ -993,12 +1038,23 @@ $([string]::Empty)
     if ($global:IncludeEstudiantes) {
         $content_gql_schema += @"
     @strawberry.field
-    def estudiantes(self, info: Info, filtro: Optional[str] = None) -> List[types.EstudianteType]:
-        get_usuario_actual(info, `"administrador`", `"docente`")
+    def estudiantes(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limit: int = 10) -> types.Connection[types.EstudianteType]:
+        usuario = get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
         q = db.query(models.Estudiante)
+        
+        if usuario.rol == `"docente`":
+            docente = db.query(models.Docente).filter(models.Docente.correo == usuario.sub).first()
+            if docente:
+                q = q.join(models.Inscripcion).join(models.Curso).filter(models.Curso.docente_id == docente.id)
+            else:
+                q = q.filter(False)
+                
         if filtro: q = q.filter(models.Estudiante.nombre.ilike(f`"%{filtro}%`"))
-        return q.all()
+        
+        total = q.count()
+        items = q.offset(offset).limit(limit).all()
+        return types.Connection(items=items, page_info=types.PageInfo(total_count=total, has_next_page=(offset + limit < total)))
 $([string]::Empty)
 "@
     }
@@ -1006,12 +1062,19 @@ $([string]::Empty)
     if ($global:IncludeDocentes) {
         $content_gql_schema += @"
     @strawberry.field
-    def docentes(self, info: Info, filtro: Optional[str] = None) -> List[types.DocenteType]:
-        get_usuario_actual(info, `"administrador`", `"docente`")
+    def docentes(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limit: int = 10) -> types.Connection[types.DocenteType]:
+        usuario = get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
         q = db.query(models.Docente)
+        
+        if usuario.rol == `"docente`":
+            q = q.filter(models.Docente.correo == usuario.sub)
+            
         if filtro: q = q.filter(models.Docente.nombre.ilike(f`"%{filtro}%`"))
-        return q.all()
+        
+        total = q.count()
+        items = q.offset(offset).limit(limit).all()
+        return types.Connection(items=items, page_info=types.PageInfo(total_count=total, has_next_page=(offset + limit < total)))
 $([string]::Empty)
 "@
     }
@@ -1019,10 +1082,23 @@ $([string]::Empty)
     if ($global:IncludeCursos) {
         $content_gql_schema += @"
     @strawberry.field
-    def cursos(self, info: Info, filtro: Optional[str] = None) -> List[types.CursoType]:
-        get_usuario_actual(info, `"administrador`", `"docente`")
+    def cursos(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limit: int = 10) -> types.Connection[types.CursoType]:
+        usuario = get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
-        return db.query(models.Curso).all()
+        q = db.query(models.Curso)
+        
+        if usuario.rol == `"docente`":
+            docente = db.query(models.Docente).filter(models.Docente.correo == usuario.sub).first()
+            if docente:
+                q = q.filter(models.Curso.docente_id == docente.id)
+            else:
+                q = q.filter(False)
+                
+        if filtro: q = q.filter(models.Curso.nombre.ilike(f`"%{filtro}%`"))
+        
+        total = q.count()
+        items = q.offset(offset).limit(limit).all()
+        return types.Connection(items=items, page_info=types.PageInfo(total_count=total, has_next_page=(offset + limit < total)))
 $([string]::Empty)
 "@
     }
@@ -1030,10 +1106,21 @@ $([string]::Empty)
     if ($global:IncludeInscripciones) {
         $content_gql_schema += @"
     @strawberry.field
-    def inscripciones(self, info: Info, filtro: Optional[str] = None) -> List[types.InscripcionType]:
-        get_usuario_actual(info, `"administrador`", `"docente`")
+    def inscripciones(self, info: Info, filtro: Optional[str] = None, offset: int = 0, limit: int = 10) -> types.Connection[types.InscripcionType]:
+        usuario = get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
-        return db.query(models.Inscripcion).all()
+        q = db.query(models.Inscripcion)
+        
+        if usuario.rol == `"docente`":
+            docente = db.query(models.Docente).filter(models.Docente.correo == usuario.sub).first()
+            if docente:
+                q = q.join(models.Curso).filter(models.Curso.docente_id == docente.id)
+            else:
+                q = q.filter(False)
+                
+        total = q.count()
+        items = q.offset(offset).limit(limit).all()
+        return types.Connection(items=items, page_info=types.PageInfo(total_count=total, has_next_page=(offset + limit < total)))
 $([string]::Empty)
 "@
     }
@@ -1064,6 +1151,28 @@ $([string]::Empty)
         db.refresh(nuevo)
         registrar_auditoria(db, usuario=usuario.sub, recurso=`"estudiante`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"codigo`": nuevo.codigo})
         return nuevo
+
+    @strawberry.mutation
+    def editar_estudiante(self, info: Info, id: int, datos: types.EstudianteInput) -> types.EstudianteType:
+        usuario = get_usuario_actual(info, `"administrador`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Estudiante).filter(models.Estudiante.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        for key, value in datos.__dict__.items():
+            setattr(obj, key, value)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    @strawberry.mutation
+    def eliminar_estudiante(self, info: Info, id: int) -> bool:
+        usuario = get_usuario_actual(info, `"administrador`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Estudiante).filter(models.Estudiante.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        db.delete(obj)
+        db.commit()
+        return True
 $([string]::Empty)
 "@
     }
@@ -1080,6 +1189,28 @@ $([string]::Empty)
         db.refresh(nuevo)
         registrar_auditoria(db, usuario=usuario.sub, recurso=`"curso`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"periodo_academico`": nuevo.periodo_academico})
         return nuevo
+
+    @strawberry.mutation
+    def editar_curso(self, info: Info, id: int, datos: types.CursoInput) -> types.CursoType:
+        usuario = get_usuario_actual(info, `"administrador`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Curso).filter(models.Curso.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        for key, value in datos.__dict__.items():
+            setattr(obj, key, value)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    @strawberry.mutation
+    def eliminar_curso(self, info: Info, id: int) -> bool:
+        usuario = get_usuario_actual(info, `"administrador`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Curso).filter(models.Curso.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        db.delete(obj)
+        db.commit()
+        return True
 $([string]::Empty)
 "@
     }
@@ -1090,12 +1221,45 @@ $([string]::Empty)
     def crear_inscripcion(self, info: Info, datos: types.InscripcionInput) -> types.InscripcionType:
         usuario = get_usuario_actual(info, `"administrador`", `"docente`")
         db = get_db_from_info(info)
+        
+        curso = db.query(models.Curso).filter(models.Curso.id == datos.curso_id).first()
+        if not curso: raise Exception(`"Curso no encontrado`")
+        if not getattr(curso, `"vigente`", True): raise Exception(`"El periodo academico no esta vigente`")
+        
+        inscripciones_actuales = db.query(models.Inscripcion).filter(models.Inscripcion.curso_id == datos.curso_id, models.Inscripcion.estado == `"activa`").count()
+        if inscripciones_actuales >= getattr(curso, `"cupo_maximo`", 30): raise Exception(`"No hay cupo disponible`")
+        
+        duplicado = db.query(models.Inscripcion).filter(models.Inscripcion.curso_id == datos.curso_id, models.Inscripcion.estudiante_id == datos.estudiante_id).first()
+        if duplicado: raise Exception(`"El estudiante ya esta inscrito en este curso`")
+        
         nueva = models.Inscripcion(**datos.__dict__)
         db.add(nueva)
         db.commit()
         db.refresh(nueva)
         registrar_auditoria(db, usuario=usuario.sub, recurso=`"inscripcion`", accion=`"crear`", valores_nuevos={`"estudiante_id`": nueva.estudiante_id, `"curso_id`": nueva.curso_id, `"estado`": nueva.estado})
         return nueva
+
+    @strawberry.mutation
+    def editar_inscripcion(self, info: Info, id: int, datos: types.InscripcionInput) -> types.InscripcionType:
+        usuario = get_usuario_actual(info, `"administrador`", `"docente`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Inscripcion).filter(models.Inscripcion.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        for key, value in datos.__dict__.items():
+            setattr(obj, key, value)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    @strawberry.mutation
+    def eliminar_inscripcion(self, info: Info, id: int) -> bool:
+        usuario = get_usuario_actual(info, `"administrador`", `"docente`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Inscripcion).filter(models.Inscripcion.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        db.delete(obj)
+        db.commit()
+        return True
 $([string]::Empty)
 "@
     }
@@ -1112,6 +1276,28 @@ $([string]::Empty)
         db.refresh(nuevo)
         registrar_auditoria(db, usuario=usuario.sub, recurso=`"docente`", accion=`"crear`", valores_nuevos={`"nombre`": nuevo.nombre, `"correo`": nuevo.correo})
         return nuevo
+
+    @strawberry.mutation
+    def editar_docente(self, info: Info, id: int, datos: types.DocenteInput) -> types.DocenteType:
+        usuario = get_usuario_actual(info, `"administrador`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Docente).filter(models.Docente.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        for key, value in datos.__dict__.items():
+            setattr(obj, key, value)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    @strawberry.mutation
+    def eliminar_docente(self, info: Info, id: int) -> bool:
+        usuario = get_usuario_actual(info, `"administrador`")
+        db = get_db_from_info(info)
+        obj = db.query(models.Docente).filter(models.Docente.id == id).first()
+        if not obj: raise Exception(`"No encontrado`")
+        db.delete(obj)
+        db.commit()
+        return True
 $([string]::Empty)
 "@
     }
@@ -2001,7 +2187,27 @@ export const LOGIN_MUTATION = gql`
     if ($global:IncludeEstudiantes) {
         $content_fe_ops += @'
 export const GET_ESTUDIANTES = gql`
-  query GetEstudiantes { estudiantes { id nombre codigo correo } }
+  query GetEstudiantes($filtro: String, $offset: Int, $limit: Int) {
+    estudiantes(filtro: $filtro, offset: $offset, limit: $limit) {
+      items { id nombre codigo correo }
+      page_info { total_count has_next_page }
+    }
+  }
+`;
+export const CREATE_ESTUDIANTE = gql`
+  mutation CrearEstudiante($datos: EstudianteInput!) {
+    crear_estudiante(datos: $datos) { id nombre codigo correo }
+  }
+`;
+export const UPDATE_ESTUDIANTE = gql`
+  mutation EditarEstudiante($id: Int!, $datos: EstudianteInput!) {
+    editar_estudiante(id: $id, datos: $datos) { id nombre codigo correo }
+  }
+`;
+export const DELETE_ESTUDIANTE = gql`
+  mutation EliminarEstudiante($id: Int!) {
+    eliminar_estudiante(id: $id)
+  }
 `;
 
 '@
@@ -2010,7 +2216,27 @@ export const GET_ESTUDIANTES = gql`
     if ($global:IncludeDocentes) {
         $content_fe_ops += @'
 export const GET_DOCENTES = gql`
-  query GetDocentes { docentes { id nombre correo especialidad } }
+  query GetDocentes($filtro: String, $offset: Int, $limit: Int) {
+    docentes(filtro: $filtro, offset: $offset, limit: $limit) {
+      items { id nombre correo especialidad }
+      page_info { total_count has_next_page }
+    }
+  }
+`;
+export const CREATE_DOCENTE = gql`
+  mutation CrearDocente($datos: DocenteInput!) {
+    crear_docente(datos: $datos) { id nombre correo especialidad }
+  }
+`;
+export const UPDATE_DOCENTE = gql`
+  mutation EditarDocente($id: Int!, $datos: DocenteInput!) {
+    editar_docente(id: $id, datos: $datos) { id nombre correo especialidad }
+  }
+`;
+export const DELETE_DOCENTE = gql`
+  mutation EliminarDocente($id: Int!) {
+    eliminar_docente(id: $id)
+  }
 `;
 
 '@
@@ -2019,7 +2245,27 @@ export const GET_DOCENTES = gql`
     if ($global:IncludeCursos) {
         $content_fe_ops += @'
 export const GET_CURSOS = gql`
-  query GetCursos { cursos { id nombre periodo_academico docente_id } }
+  query GetCursos($filtro: String, $offset: Int, $limit: Int) {
+    cursos(filtro: $filtro, offset: $offset, limit: $limit) {
+      items { id nombre periodo_academico docente_id cupo_maximo vigente }
+      page_info { total_count has_next_page }
+    }
+  }
+`;
+export const CREATE_CURSO = gql`
+  mutation CrearCurso($datos: CursoInput!) {
+    crear_curso(datos: $datos) { id nombre periodo_academico docente_id cupo_maximo vigente }
+  }
+`;
+export const UPDATE_CURSO = gql`
+  mutation EditarCurso($id: Int!, $datos: CursoInput!) {
+    editar_curso(id: $id, datos: $datos) { id nombre periodo_academico docente_id cupo_maximo vigente }
+  }
+`;
+export const DELETE_CURSO = gql`
+  mutation EliminarCurso($id: Int!) {
+    eliminar_curso(id: $id)
+  }
 `;
 
 '@
@@ -2028,7 +2274,27 @@ export const GET_CURSOS = gql`
     if ($global:IncludeInscripciones) {
         $content_fe_ops += @'
 export const GET_INSCRIPCIONES = gql`
-  query GetInscripciones { inscripciones { id estado estudiante_id curso_id } }
+  query GetInscripciones($filtro: String, $offset: Int, $limit: Int) {
+    inscripciones(filtro: $filtro, offset: $offset, limit: $limit) {
+      items { id estado estudiante_id curso_id }
+      page_info { total_count has_next_page }
+    }
+  }
+`;
+export const CREATE_INSCRIPCION = gql`
+  mutation CrearInscripcion($datos: InscripcionInput!) {
+    crear_inscripcion(datos: $datos) { id estado estudiante_id curso_id }
+  }
+`;
+export const UPDATE_INSCRIPCION = gql`
+  mutation EditarInscripcion($id: Int!, $datos: InscripcionInput!) {
+    editar_inscripcion(id: $id, datos: $datos) { id estado estudiante_id curso_id }
+  }
+`;
+export const DELETE_INSCRIPCION = gql`
+  mutation EliminarInscripcion($id: Int!) {
+    eliminar_inscripcion(id: $id)
+  }
 `;
 
 '@
@@ -2479,53 +2745,138 @@ export default function Layout() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\Layout.jsx") -Content $content_fe_layout
 
     $content_fe_estudiantes = @'
-import { useQuery } from "@apollo/client";
-import { GET_ESTUDIANTES } from "../../graphql/operations";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import { GET_ESTUDIANTES, CREATE_ESTUDIANTE, UPDATE_ESTUDIANTE, DELETE_ESTUDIANTE } from "../../graphql/operations";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TablePagination } from "@mui/material";
+import { Edit as EditIcon, Delete as DeleteIcon, Add as AddIcon } from "@mui/icons-material";
 import PageHeader from "../../design-system/components/PageHeader";
+import ImgEstudiantes from "../../assets/img-estudiantes.svg";
 
 export default function EstudiantesPage() {
-  const { data, loading, error } = useQuery(GET_ESTUDIANTES);
+  const [filtro, setFiltro] = useState("");
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  
+  const [open, setOpen] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [formData, setFormData] = useState({ nombre: "", codigo: "", correo: "" });
+
+  const { data, loading, error, refetch } = useQuery(GET_ESTUDIANTES, {
+    variables: { filtro, offset: page * rowsPerPage, limit: rowsPerPage },
+    fetchPolicy: "network-only"
+  });
+
+  const [createItem] = useMutation(CREATE_ESTUDIANTE, { onCompleted: () => refetch() });
+  const [updateItem] = useMutation(UPDATE_ESTUDIANTE, { onCompleted: () => refetch() });
+  const [deleteItem] = useMutation(DELETE_ESTUDIANTE, { onCompleted: () => refetch() });
+
+  const handleOpen = (item = null) => {
+    if (item) {
+      setEditItem(item);
+      setFormData({ nombre: item.nombre, codigo: item.codigo, correo: item.correo });
+    } else {
+      setEditItem(null);
+      setFormData({ nombre: "", codigo: "", correo: "" });
+    }
+    setOpen(true);
+  };
+
+  const handleClose = () => setOpen(false);
+
+  const handleSave = async () => {
+    try {
+      if (editItem) {
+        await updateItem({ variables: { id: parseInt(editItem.id), datos: formData } });
+      } else {
+        await createItem({ variables: { datos: formData } });
+      }
+      handleClose();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (window.confirm("¿Seguro que deseas eliminar este registro?")) {
+      try {
+        await deleteItem({ variables: { id: parseInt(id) } });
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+  };
 
   return (
     <Box>
-      <PageHeader
-        eyebrow="Registro 01"
-        title="Estudiantes"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.estudiantes.length} matriculados
-          </Typography>
-        )}
-      />
+      <Box sx={{ display: "flex", gap: 3, mb: 3 }}>
+        <img src={ImgEstudiantes} alt="Estudiantes" style={{ width: "72px", height: "72px" }} />
+        <Box sx={{ flex: 1 }}>
+          <PageHeader eyebrow="Registro 01" title="Estudiantes" />
+        </Box>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={() => handleOpen()} sx={{ height: 40, alignSelf: "center" }}>
+          Nuevo Estudiante
+        </Button>
+      </Box>
 
-      {loading && <CircularProgress size={24} />}
-      {error && <Typography color="error">Error: {error.message}</Typography>}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <TextField fullWidth size="small" label="Buscar estudiante..." variant="outlined" value={filtro} onChange={(e) => setFiltro(e.target.value)} onBlur={() => refetch()} />
+      </Paper>
 
-      {data && (
-        <Paper variant="outlined">
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell width={110}>Codigo</TableCell>
-                <TableCell>Nombre</TableCell>
-                <TableCell>Correo</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {data.estudiantes.map((e) => (
-                <TableRow key={e.id} hover>
-                  <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem" }}>
-                    {e.codigo}
-                  </TableCell>
-                  <TableCell sx={{ fontWeight: 500 }}>{e.nombre}</TableCell>
-                  <TableCell sx={{ color: "text.secondary" }}>{e.correo}</TableCell>
+      <Paper>
+        {loading ? (
+          <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>
+        ) : error ? (
+          <Typography color="error" sx={{ p: 2 }}>Error: {error.message}</Typography>
+        ) : (
+          <>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell><b>Nombre</b></TableCell>
+                  <TableCell><b>Código</b></TableCell>
+                  <TableCell><b>Correo</b></TableCell>
+                  <TableCell align="right"><b>Acciones</b></TableCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Paper>
-      )}
+              </TableHead>
+              <TableBody>
+                {data?.estudiantes?.items.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell>{row.nombre}</TableCell>
+                    <TableCell>{row.codigo}</TableCell>
+                    <TableCell>{row.correo}</TableCell>
+                    <TableCell align="right">
+                      <IconButton color="primary" onClick={() => handleOpen(row)}><EditIcon /></IconButton>
+                      <IconButton color="error" onClick={() => handleDelete(row.id)}><DeleteIcon /></IconButton>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <TablePagination
+              component="div"
+              count={data?.estudiantes?.page_info?.total_count || 0}
+              page={page}
+              onPageChange={(e, newPage) => setPage(newPage)}
+              rowsPerPage={rowsPerPage}
+              onRowsPerPageChange={(e) => { setRowsPerPage(parseInt(e.target.value, 10)); setPage(0); }}
+            />
+          </>
+        )}
+      </Paper>
+
+      <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
+        <DialogTitle>{editItem ? "Editar Estudiante" : "Nuevo Estudiante"}</DialogTitle>
+        <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 2 }}>
+          <TextField label="Nombre" fullWidth value={formData.nombre} onChange={(e) => setFormData({ ...formData, nombre: e.target.value })} />
+          <TextField label="Código" fullWidth value={formData.codigo} onChange={(e) => setFormData({ ...formData, codigo: e.target.value })} />
+          <TextField label="Correo" fullWidth value={formData.correo} onChange={(e) => setFormData({ ...formData, correo: e.target.value })} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleClose}>Cancelar</Button>
+          <Button variant="contained" onClick={handleSave}>Guardar</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -2574,6 +2925,7 @@ import { Box, Typography, Paper } from `"@mui/material`";
 import { useNavigate } from `"react-router-dom`";
 import { useAuth } from `"../../auth/AuthContext`";
 import { academic } from `"../../theme`";
+import LogoInicio from `"../../assets/logo-inicio.svg`";
 
 const SECCIONES = [];
 $([string]::Empty)
@@ -2590,12 +2942,17 @@ export default function InicioPage() {
 
   return (
     <Box>
-      <Typography variant=`"overline`" sx={{ color: academic.gold, fontWeight: 500 }}>
-        Panel principal
-      </Typography>
-      <Typography variant=`"h3`" sx={{ mt: 0.5 }}>
-        Bienvenido
-      </Typography>
+      <Box sx={{ display: `"flex`", alignItems: `"center`", gap: 2, mb: 1 }}>
+        <img src={LogoInicio} alt=`"Logo Academico`" style={{ width: `"80px`", height: `"80px`" }} />
+        <Box>
+          <Typography variant=`"overline`" sx={{ color: academic.gold, fontWeight: 500 }}>
+            Panel principal
+          </Typography>
+          <Typography variant=`"h3`" sx={{ mt: 0.5 }}>
+            Bienvenido
+          </Typography>
+        </Box>
+      </Box>
       <Typography variant=`"subtitle1`" sx={{ mt: 0.5, mb: 4 }}>
         Sesion iniciada como <strong>{user?.correo}</strong> &middot; rol {user?.rol}
       </Typography>
@@ -2630,6 +2987,79 @@ export default function InicioPage() {
 }
 "@
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\inicio\InicioPage.jsx") -Content $content_fe_inicio
+
+    $content_fe_asset_logo = @"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M10 70 Q 25 60 50 70 Q 75 60 90 70 L 90 85 Q 75 75 50 85 Q 25 75 10 85 Z" fill="#A8E6CF" stroke="#000" stroke-width="4"/>
+  <path d="M10 70 Q 25 60 50 70 Q 75 60 90 70" fill="none" stroke="#000" stroke-width="4"/>
+  <path d="M50 70 L 50 85" fill="none" stroke="#000" stroke-width="4"/>
+  <path d="M10 60 Q 25 50 50 60 Q 75 50 90 60" fill="none" stroke="#000" stroke-width="4"/>
+  <path d="M50 60 L 50 70" fill="none" stroke="#000" stroke-width="4"/>
+  <polygon points="15,30 50,20 85,30 50,40" fill="#B3B3F1" stroke="#000" stroke-width="4"/>
+  <rect x="30" y="35" width="40" height="20" fill="#B3B3F1" stroke="#000" stroke-width="4"/>
+  <line x1="85" y1="30" x2="85" y2="50" stroke="#000" stroke-width="4"/>
+  <rect x="80" y="50" width="10" height="15" rx="5" fill="#F4D03F" stroke="#000" stroke-width="4"/>
+</svg>
+"@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\assets\logo-inicio.svg") -Content $content_fe_asset_logo
+
+    $content_img_cursos = @"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect x="50" y="10" width="45" height="40" fill="#E8E8E8" stroke="#0A1128" stroke-width="4"/>
+  <path d="M55 35 L 65 25 L 75 30 L 85 20" fill="none" stroke="#0A1128" stroke-width="4"/>
+  <rect x="5" y="45" width="45" height="15" fill="#425563" stroke="#0A1128" stroke-width="4"/>
+  <circle cx="25" cy="20" r="8" fill="#F4A261" stroke="#0A1128" stroke-width="3"/>
+  <path d="M15 45 L 15 35 Q 25 35 35 35 L 35 45 Z" fill="#4EA8DE" stroke="#0A1128" stroke-width="4"/>
+  <circle cx="20" cy="70" r="7" fill="#72BDA3" stroke="#0A1128" stroke-width="3"/>
+  <path d="M10 100 Q 20 80 30 100" fill="#72BDA3" stroke="#0A1128" stroke-width="4"/>
+  <circle cx="40" cy="70" r="7" fill="#72BDA3" stroke="#0A1128" stroke-width="3"/>
+  <path d="M30 100 Q 40 80 50 100" fill="#72BDA3" stroke="#0A1128" stroke-width="4"/>
+  <circle cx="60" cy="70" r="7" fill="#72BDA3" stroke="#0A1128" stroke-width="3"/>
+  <path d="M50 100 Q 60 80 70 100" fill="#72BDA3" stroke="#0A1128" stroke-width="4"/>
+  <circle cx="80" cy="70" r="7" fill="#72BDA3" stroke="#0A1128" stroke-width="3"/>
+  <path d="M70 100 Q 80 80 90 100" fill="#72BDA3" stroke="#0A1128" stroke-width="4"/>
+</svg>
+"@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\assets\img-cursos.svg") -Content $content_img_cursos
+
+    $content_img_docentes = @"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect x="30" y="20" width="60" height="40" fill="#fff" stroke="#333" stroke-width="4" rx="2"/>
+  <circle cx="30" cy="35" r="8" fill="#333" />
+  <path d="M15 65 Q 30 50 45 65 L 50 40" fill="none" stroke="#333" stroke-width="5" stroke-linecap="round"/>
+  <path d="M15 65 L 15 75 L 45 75 L 45 65" fill="#333" />
+  <rect x="10" y="65" width="40" height="10" fill="#333" rx="2"/>
+  <rect x="15" y="75" width="30" height="15" fill="#333"/>
+</svg>
+"@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\assets\img-docentes.svg") -Content $content_img_docentes
+
+    $content_img_estudiantes = @"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="40" fill="#E6EEF2" />
+  <path d="M20 90 Q 50 50 80 90" fill="#1A3B8B" />
+  <circle cx="50" cy="50" r="15" fill="#F4D03F" />
+  <polygon points="30,30 50,20 70,30 50,40" fill="#1A3B8B" />
+  <rect x="40" y="35" width="20" height="15" fill="#1A3B8B" />
+  <line x1="70" y1="30" x2="70" y2="50" stroke="#F4A261" stroke-width="4"/>
+  <rect x="65" y="50" width="10" height="10" rx="3" fill="#F4D03F" />
+</svg>
+"@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\assets\img-estudiantes.svg") -Content $content_img_estudiantes
+
+    $content_img_inscripciones = @"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect x="15" y="5" width="60" height="90" fill="#F0F0F0" stroke="#000" stroke-width="4" rx="2"/>
+  <polygon points="75,5 95,25 75,25" fill="#FFF" stroke="#000" stroke-width="4"/>
+  <circle cx="45" cy="30" r="10" fill="#FFC8A2" stroke="#000" stroke-width="4"/>
+  <path d="M25 50 Q 45 40 65 50" fill="#7EA4D3" stroke="#000" stroke-width="4"/>
+  <line x1="25" y1="65" x2="65" y2="65" stroke="#000" stroke-width="4" stroke-linecap="round"/>
+  <line x1="25" y1="75" x2="50" y2="75" stroke="#000" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="75" cy="75" r="18" fill="#72BDA3" stroke="#000" stroke-width="4"/>
+  <path d="M67 75 L 72 80 L 82 68" fill="none" stroke="#000" stroke-width="4" stroke-linecap="round"/>
+</svg>
+"@
+    Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\assets\img-inscripciones.svg") -Content $content_img_inscripciones
 
     $content_fe_app = @"
 import { Routes, Route, Navigate } from `"react-router-dom`";
@@ -2673,54 +3103,138 @@ $([string]::Empty)
 
     # --- Frontend: Docentes, Cursos, Inscripciones ---
     $content_fe_docentes = @'
-import { useQuery, gql } from "@apollo/client";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import { GET_DOCENTES, CREATE_DOCENTE, UPDATE_DOCENTE, DELETE_DOCENTE } from "../../graphql/operations";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TablePagination } from "@mui/material";
+import { Edit as EditIcon, Delete as DeleteIcon, Add as AddIcon } from "@mui/icons-material";
 import PageHeader from "../../design-system/components/PageHeader";
-
-const GET_DOCENTES = gql`
-  query { docentes { id nombre correo especialidad } }
-`;
+import ImgDocentes from "../../assets/img-docentes.svg";
 
 export default function DocentesPage() {
-  const { data, loading, error } = useQuery(GET_DOCENTES);
+  const [filtro, setFiltro] = useState("");
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  
+  const [open, setOpen] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [formData, setFormData] = useState({ nombre: "", correo: "", especialidad: "" });
+
+  const { data, loading, error, refetch } = useQuery(GET_DOCENTES, {
+    variables: { filtro, offset: page * rowsPerPage, limit: rowsPerPage },
+    fetchPolicy: "network-only"
+  });
+
+  const [createItem] = useMutation(CREATE_DOCENTE, { onCompleted: () => refetch() });
+  const [updateItem] = useMutation(UPDATE_DOCENTE, { onCompleted: () => refetch() });
+  const [deleteItem] = useMutation(DELETE_DOCENTE, { onCompleted: () => refetch() });
+
+  const handleOpen = (item = null) => {
+    if (item) {
+      setEditItem(item);
+      setFormData({ nombre: item.nombre, correo: item.correo, especialidad: item.especialidad || "" });
+    } else {
+      setEditItem(null);
+      setFormData({ nombre: "", correo: "", especialidad: "" });
+    }
+    setOpen(true);
+  };
+
+  const handleClose = () => setOpen(false);
+
+  const handleSave = async () => {
+    try {
+      if (editItem) {
+        await updateItem({ variables: { id: parseInt(editItem.id), datos: formData } });
+      } else {
+        await createItem({ variables: { datos: formData } });
+      }
+      handleClose();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (window.confirm("¿Seguro que deseas eliminar este registro?")) {
+      try {
+        await deleteItem({ variables: { id: parseInt(id) } });
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+  };
 
   return (
     <Box>
-      <PageHeader
-        eyebrow="Registro 02"
-        title="Docentes"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.docentes.length} en planta
-          </Typography>
-        )}
-      />
+      <Box sx={{ display: "flex", gap: 3, mb: 3 }}>
+        <img src={ImgDocentes} alt="Docentes" style={{ width: "72px", height: "72px" }} />
+        <Box sx={{ flex: 1 }}>
+          <PageHeader eyebrow="Registro 02" title="Docentes" />
+        </Box>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={() => handleOpen()} sx={{ height: 40, alignSelf: "center" }}>
+          Nuevo Docente
+        </Button>
+      </Box>
 
-      {loading && <CircularProgress size={24} />}
-      {error && <Typography color="error">Error: {error.message}</Typography>}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <TextField fullWidth size="small" label="Buscar docente..." variant="outlined" value={filtro} onChange={(e) => setFiltro(e.target.value)} onBlur={() => refetch()} />
+      </Paper>
 
-      {data && (
-        <Paper variant="outlined">
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell>Nombre</TableCell>
-                <TableCell>Correo</TableCell>
-                <TableCell>Especialidad</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {data.docentes.map((d) => (
-                <TableRow key={d.id} hover>
-                  <TableCell sx={{ fontWeight: 500 }}>{d.nombre}</TableCell>
-                  <TableCell sx={{ color: "text.secondary" }}>{d.correo}</TableCell>
-                  <TableCell>{d.especialidad || "Sin especialidad"}</TableCell>
+      <Paper>
+        {loading ? (
+          <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>
+        ) : error ? (
+          <Typography color="error" sx={{ p: 2 }}>Error: {error.message}</Typography>
+        ) : (
+          <>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell><b>Nombre</b></TableCell>
+                  <TableCell><b>Correo</b></TableCell>
+                  <TableCell><b>Especialidad</b></TableCell>
+                  <TableCell align="right"><b>Acciones</b></TableCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Paper>
-      )}
+              </TableHead>
+              <TableBody>
+                {data?.docentes?.items.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell>{row.nombre}</TableCell>
+                    <TableCell>{row.correo}</TableCell>
+                    <TableCell>{row.especialidad}</TableCell>
+                    <TableCell align="right">
+                      <IconButton color="primary" onClick={() => handleOpen(row)}><EditIcon /></IconButton>
+                      <IconButton color="error" onClick={() => handleDelete(row.id)}><DeleteIcon /></IconButton>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <TablePagination
+              component="div"
+              count={data?.docentes?.page_info?.total_count || 0}
+              page={page}
+              onPageChange={(e, newPage) => setPage(newPage)}
+              rowsPerPage={rowsPerPage}
+              onRowsPerPageChange={(e) => { setRowsPerPage(parseInt(e.target.value, 10)); setPage(0); }}
+            />
+          </>
+        )}
+      </Paper>
+
+      <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
+        <DialogTitle>{editItem ? "Editar Docente" : "Nuevo Docente"}</DialogTitle>
+        <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 2 }}>
+          <TextField label="Nombre" fullWidth value={formData.nombre} onChange={(e) => setFormData({ ...formData, nombre: e.target.value })} />
+          <TextField label="Correo" fullWidth value={formData.correo} onChange={(e) => setFormData({ ...formData, correo: e.target.value })} />
+          <TextField label="Especialidad" fullWidth value={formData.especialidad} onChange={(e) => setFormData({ ...formData, especialidad: e.target.value })} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleClose}>Cancelar</Button>
+          <Button variant="contained" onClick={handleSave}>Guardar</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -2728,54 +3242,151 @@ export default function DocentesPage() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\docentes\DocentesPage.jsx") -Content $content_fe_docentes
 
     $content_fe_cursos = @'
-import { useQuery, gql } from "@apollo/client";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import { GET_CURSOS, CREATE_CURSO, UPDATE_CURSO, DELETE_CURSO } from "../../graphql/operations";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TablePagination, Checkbox, FormControlLabel } from "@mui/material";
+import { Edit as EditIcon, Delete as DeleteIcon, Add as AddIcon } from "@mui/icons-material";
 import PageHeader from "../../design-system/components/PageHeader";
-
-const GET_CURSOS = gql`
-  query { cursos { id nombre periodo_academico } }
-`;
+import ImgCursos from "../../assets/img-cursos.svg";
 
 export default function CursosPage() {
-  const { data, loading, error } = useQuery(GET_CURSOS);
+  const [filtro, setFiltro] = useState("");
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  
+  const [open, setOpen] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [formData, setFormData] = useState({ nombre: "", periodo_academico: "", docente_id: "", cupo_maximo: 30, vigente: true });
+
+  const { data, loading, error, refetch } = useQuery(GET_CURSOS, {
+    variables: { filtro, offset: page * rowsPerPage, limit: rowsPerPage },
+    fetchPolicy: "network-only"
+  });
+
+  const [createItem] = useMutation(CREATE_CURSO, { onCompleted: () => refetch() });
+  const [updateItem] = useMutation(UPDATE_CURSO, { onCompleted: () => refetch() });
+  const [deleteItem] = useMutation(DELETE_CURSO, { onCompleted: () => refetch() });
+
+  const handleOpen = (item = null) => {
+    if (item) {
+      setEditItem(item);
+      setFormData({ nombre: item.nombre, periodo_academico: item.periodo_academico, docente_id: item.docente_id || "", cupo_maximo: item.cupo_maximo || 30, vigente: item.vigente });
+    } else {
+      setEditItem(null);
+      setFormData({ nombre: "", periodo_academico: "", docente_id: "", cupo_maximo: 30, vigente: true });
+    }
+    setOpen(true);
+  };
+
+  const handleClose = () => setOpen(false);
+
+  const handleSave = async () => {
+    try {
+      const variables = { 
+        datos: { 
+          nombre: formData.nombre, 
+          periodo_academico: formData.periodo_academico, 
+          docente_id: formData.docente_id ? parseInt(formData.docente_id) : null,
+          cupo_maximo: parseInt(formData.cupo_maximo),
+          vigente: formData.vigente
+        } 
+      };
+      if (editItem) {
+        await updateItem({ variables: { id: parseInt(editItem.id), ...variables } });
+      } else {
+        await createItem({ variables });
+      }
+      handleClose();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (window.confirm("¿Seguro que deseas eliminar este registro?")) {
+      try {
+        await deleteItem({ variables: { id: parseInt(id) } });
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+  };
 
   return (
     <Box>
-      <PageHeader
-        eyebrow="Registro 03"
-        title="Cursos"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.cursos.length} activos
-          </Typography>
-        )}
-      />
+      <Box sx={{ display: "flex", gap: 3, mb: 3 }}>
+        <img src={ImgCursos} alt="Cursos" style={{ width: "72px", height: "72px" }} />
+        <Box sx={{ flex: 1 }}>
+          <PageHeader eyebrow="Registro 03" title="Cursos" />
+        </Box>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={() => handleOpen()} sx={{ height: 40, alignSelf: "center" }}>
+          Nuevo Curso
+        </Button>
+      </Box>
 
-      {loading && <CircularProgress size={24} />}
-      {error && <Typography color="error">Error: {error.message}</Typography>}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <TextField fullWidth size="small" label="Buscar curso..." variant="outlined" value={filtro} onChange={(e) => setFiltro(e.target.value)} onBlur={() => refetch()} />
+      </Paper>
 
-      {data && (
-        <Paper variant="outlined">
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell>Curso</TableCell>
-                <TableCell width={160}>Periodo</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {data.cursos.map((c) => (
-                <TableRow key={c.id} hover>
-                  <TableCell sx={{ fontWeight: 500 }}>{c.nombre}</TableCell>
-                  <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem", color: "text.secondary" }}>
-                    {c.periodo_academico}
-                  </TableCell>
+      <Paper>
+        {loading ? (
+          <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>
+        ) : error ? (
+          <Typography color="error" sx={{ p: 2 }}>Error: {error.message}</Typography>
+        ) : (
+          <>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell><b>Nombre</b></TableCell>
+                  <TableCell><b>Periodo</b></TableCell>
+                  <TableCell><b>Cupo</b></TableCell>
+                  <TableCell><b>Estado</b></TableCell>
+                  <TableCell align="right"><b>Acciones</b></TableCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Paper>
-      )}
+              </TableHead>
+              <TableBody>
+                {data?.cursos?.items.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell>{row.nombre}</TableCell>
+                    <TableCell>{row.periodo_academico}</TableCell>
+                    <TableCell>{row.cupo_maximo}</TableCell>
+                    <TableCell>{row.vigente ? "Vigente" : "Cerrado"}</TableCell>
+                    <TableCell align="right">
+                      <IconButton color="primary" onClick={() => handleOpen(row)}><EditIcon /></IconButton>
+                      <IconButton color="error" onClick={() => handleDelete(row.id)}><DeleteIcon /></IconButton>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <TablePagination
+              component="div"
+              count={data?.cursos?.page_info?.total_count || 0}
+              page={page}
+              onPageChange={(e, newPage) => setPage(newPage)}
+              rowsPerPage={rowsPerPage}
+              onRowsPerPageChange={(e) => { setRowsPerPage(parseInt(e.target.value, 10)); setPage(0); }}
+            />
+          </>
+        )}
+      </Paper>
+
+      <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
+        <DialogTitle>{editItem ? "Editar Curso" : "Nuevo Curso"}</DialogTitle>
+        <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 2 }}>
+          <TextField label="Nombre" fullWidth value={formData.nombre} onChange={(e) => setFormData({ ...formData, nombre: e.target.value })} />
+          <TextField label="Periodo Académico" fullWidth value={formData.periodo_academico} onChange={(e) => setFormData({ ...formData, periodo_academico: e.target.value })} />
+          <TextField label="ID Docente Asignado" type="number" fullWidth value={formData.docente_id} onChange={(e) => setFormData({ ...formData, docente_id: e.target.value })} />
+          <TextField label="Cupo Máximo" type="number" fullWidth value={formData.cupo_maximo} onChange={(e) => setFormData({ ...formData, cupo_maximo: e.target.value })} />
+          <FormControlLabel control={<Checkbox checked={formData.vigente} onChange={(e) => setFormData({ ...formData, vigente: e.target.checked })} />} label="Periodo Vigente" />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleClose}>Cancelar</Button>
+          <Button variant="contained" onClick={handleSave}>Guardar</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -2783,57 +3394,146 @@ export default function CursosPage() {
     Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\modules\cursos\CursosPage.jsx") -Content $content_fe_cursos
 
     $content_fe_insc = @'
-import { useQuery, gql } from "@apollo/client";
-import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box } from "@mui/material";
+import { useState } from "react";
+import { useQuery, useMutation } from "@apollo/client";
+import { GET_INSCRIPCIONES, CREATE_INSCRIPCION, UPDATE_INSCRIPCION, DELETE_INSCRIPCION } from "../../graphql/operations";
+import { Typography, Paper, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress, Box, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, TablePagination, MenuItem } from "@mui/material";
+import { Edit as EditIcon, Delete as DeleteIcon, Add as AddIcon } from "@mui/icons-material";
 import PageHeader from "../../design-system/components/PageHeader";
 import StatusStamp from "../../design-system/components/StatusStamp";
-
-const GET_INSC = gql`
-  query { inscripciones { id estado } }
-`;
+import ImgInscripciones from "../../assets/img-inscripciones.svg";
 
 export default function InscripcionesPage() {
-  const { data, loading, error } = useQuery(GET_INSC);
+  const [filtro, setFiltro] = useState("");
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  
+  const [open, setOpen] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [formData, setFormData] = useState({ estudiante_id: "", curso_id: "", estado: "activa" });
+
+  const { data, loading, error, refetch } = useQuery(GET_INSCRIPCIONES, {
+    variables: { filtro, offset: page * rowsPerPage, limit: rowsPerPage },
+    fetchPolicy: "network-only"
+  });
+
+  const [createItem] = useMutation(CREATE_INSCRIPCION, { onCompleted: () => refetch() });
+  const [updateItem] = useMutation(UPDATE_INSCRIPCION, { onCompleted: () => refetch() });
+  const [deleteItem] = useMutation(DELETE_INSCRIPCION, { onCompleted: () => refetch() });
+
+  const handleOpen = (item = null) => {
+    if (item) {
+      setEditItem(item);
+      setFormData({ estudiante_id: item.estudiante_id || "", curso_id: item.curso_id || "", estado: item.estado });
+    } else {
+      setEditItem(null);
+      setFormData({ estudiante_id: "", curso_id: "", estado: "activa" });
+    }
+    setOpen(true);
+  };
+
+  const handleClose = () => setOpen(false);
+
+  const handleSave = async () => {
+    try {
+      const variables = { 
+        datos: { 
+          estudiante_id: formData.estudiante_id ? parseInt(formData.estudiante_id) : null,
+          curso_id: formData.curso_id ? parseInt(formData.curso_id) : null,
+          estado: formData.estado
+        } 
+      };
+      if (editItem) {
+        await updateItem({ variables: { id: parseInt(editItem.id), ...variables } });
+      } else {
+        await createItem({ variables });
+      }
+      handleClose();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (window.confirm("¿Seguro que deseas eliminar este registro?")) {
+      try {
+        await deleteItem({ variables: { id: parseInt(id) } });
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+  };
 
   return (
     <Box>
-      <PageHeader
-        eyebrow="Registro 04"
-        title="Inscripciones"
-        action={data && (
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            {data.inscripciones.length} movimientos
-          </Typography>
-        )}
-      />
+      <Box sx={{ display: "flex", gap: 3, mb: 3 }}>
+        <img src={ImgInscripciones} alt="Inscripciones" style={{ width: "72px", height: "72px" }} />
+        <Box sx={{ flex: 1 }}>
+          <PageHeader eyebrow="Registro 04" title="Inscripciones" />
+        </Box>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={() => handleOpen()} sx={{ height: 40, alignSelf: "center" }}>
+          Nueva Inscripción
+        </Button>
+      </Box>
 
-      {loading && <CircularProgress size={24} />}
-      {error && <Typography color="error">Error: {error.message}</Typography>}
-
-      {data && (
-        <Paper variant="outlined">
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell width={140}>Numero</TableCell>
-                <TableCell>Estado</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {data.inscripciones.map((i) => (
-                <TableRow key={i.id} hover>
-                  <TableCell sx={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: "0.85rem" }}>
-                    #{String(i.id).padStart(4, "0")}
-                  </TableCell>
-                  <TableCell>
-                    <StatusStamp estado={i.estado} />
-                  </TableCell>
+      <Paper>
+        {loading ? (
+          <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>
+        ) : error ? (
+          <Typography color="error" sx={{ p: 2 }}>Error: {error.message}</Typography>
+        ) : (
+          <>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell><b>ID Estudiante</b></TableCell>
+                  <TableCell><b>ID Curso</b></TableCell>
+                  <TableCell><b>Estado</b></TableCell>
+                  <TableCell align="right"><b>Acciones</b></TableCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Paper>
-      )}
+              </TableHead>
+              <TableBody>
+                {data?.inscripciones?.items.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell>{row.estudiante_id}</TableCell>
+                    <TableCell>{row.curso_id}</TableCell>
+                    <TableCell><StatusStamp estado={row.estado} /></TableCell>
+                    <TableCell align="right">
+                      <IconButton color="primary" onClick={() => handleOpen(row)}><EditIcon /></IconButton>
+                      <IconButton color="error" onClick={() => handleDelete(row.id)}><DeleteIcon /></IconButton>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <TablePagination
+              component="div"
+              count={data?.inscripciones?.page_info?.total_count || 0}
+              page={page}
+              onPageChange={(e, newPage) => setPage(newPage)}
+              rowsPerPage={rowsPerPage}
+              onRowsPerPageChange={(e) => { setRowsPerPage(parseInt(e.target.value, 10)); setPage(0); }}
+            />
+          </>
+        )}
+      </Paper>
+
+      <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
+        <DialogTitle>{editItem ? "Editar Inscripción" : "Nueva Inscripción"}</DialogTitle>
+        <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 2 }}>
+          <TextField label="ID Estudiante" type="number" fullWidth value={formData.estudiante_id} onChange={(e) => setFormData({ ...formData, estudiante_id: e.target.value })} />
+          <TextField label="ID Curso" type="number" fullWidth value={formData.curso_id} onChange={(e) => setFormData({ ...formData, curso_id: e.target.value })} />
+          <TextField select label="Estado" fullWidth value={formData.estado} onChange={(e) => setFormData({ ...formData, estado: e.target.value })}>
+            <MenuItem value="activa">Activa</MenuItem>
+            <MenuItem value="cerrada">Cerrada</MenuItem>
+            <MenuItem value="cupo_lleno">Cupo Lleno</MenuItem>
+          </TextField>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleClose}>Cancelar</Button>
+          <Button variant="contained" onClick={handleSave}>Guardar</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
