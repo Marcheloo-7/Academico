@@ -34,14 +34,21 @@ El script tarda varios minutos (instala dependencias de Python con pip, dependen
 
 ## 3. Preguntas interactivas (s/n)
 
-Durante la ejecucion (seccion CA-003), el script pregunta que roles del sistema incluir:
+Durante la ejecucion, el script hara varias preguntas para configurar el proyecto:
 
-```
+```text
+Desea crear el nuevo producto en la ubicacion actual? (s/n)
+  (En caso de "n", te preguntará el nombre del nuevo producto)
+
 Desea incluir el rol Administrador? (s/n)
 Desea incluir el rol Docente? (s/n)
+  Desea incluir el modulo Estudiantes? (s/n)
+  Desea incluir el modulo Docentes? (s/n)
+  Desea incluir el modulo Cursos? (s/n)
+  Desea incluir el modulo Inscripciones? (s/n)
 ```
 
-Responder `s` o `n` y presionar Enter. Si no estas seguro, responde `s` a ambas (es lo recomendado; el resto del sistema asume que existen ambos roles).
+Responder `s` o `n` y presionar Enter. Si no estas seguro, responde `s` a todo (es lo recomendado; el resto del sistema asume que existen estos elementos para su funcionamiento base).
 
 ## 4. Que genera el script
 
@@ -62,6 +69,10 @@ El script instala y genera, en orden, los 11 Core Assets:
 | CA-011 | DevOps Templates (Docker, docker-compose, CI/CD) |
 
 Al terminar, tendras dos carpetas nuevas: `backend/` y `frontend/`, ademas de archivos de infraestructura en la raiz (`Dockerfile`, `docker-compose.yml`, `.github/workflows/`).
+
+El script ya no solo genera el esqueleto base, sino que implementa **módulos completamente funcionales (Estudiantes, Docentes, Cursos e Inscripciones)**, dependiendo de tus respuestas en la sección de preguntas interactivas. Esto incluye:
+- **Backend:** Esquema GraphQL con paginación, filtros y mutaciones completas (Create, Read, Update, Delete). Incluye reglas de negocio (validación de cupos máximos, cursos vigentes, etc.) y filtrado de acceso según el rol (RBAC).
+- **Frontend:** Interfaces CRUD conectadas mediante Apollo Client, tablas dinámicas con `<TablePagination>`, formularios modales (`<Dialog>`), diseño responsivo usando MUI e íconos distintivos por módulo.
 
 El script es **idempotente**: si un archivo ya existe, lo omite (`[OMITIDO]`) en vez de sobreescribirlo. Se puede volver a correr sin miedo a perder cambios manuales ya hechos.
 
@@ -108,11 +119,18 @@ npm run dev
 - Backend: http://localhost:8000
 - Frontend: http://localhost:5173
 
-Al primer arranque del backend se crea automaticamente un usuario administrador de prueba:
+Al primer arranque del backend (o al ejecutar `seed_data.py`), se crean automaticamente usuarios de prueba:
 
+**Administrador (siempre disponible):**
 ```
 correo:     admin@academico.com
 contrasena: admin123
+```
+
+**Docente (si se incluyó el módulo Docentes):**
+```
+correo:     docente1@academico.com
+contrasena: Docente123
 ```
 
 ## 7. Datos de ejemplo (opcional)
