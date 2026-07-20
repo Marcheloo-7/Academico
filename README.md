@@ -32,16 +32,46 @@ powershell -ExecutionPolicy Bypass -File .\setup_core_assets.ps1
 
 El script tarda varios minutos (instala dependencias de Python con pip, dependencias de Node con npm, y genera el backend y el frontend completos). No cerrar la consola hasta que termine.
 
-## 3. Preguntas interactivas (s/n)
+## 3. Preguntas interactivas (s/n) y Estado de Core Assets
 
-Durante la ejecucion (seccion CA-003), el script pregunta que roles del sistema incluir:
+Durante la ejecucion, el script realiza varias preguntas interactivas para personalizar el producto de software. Estas son las preguntas y para que sirven:
 
+- **Desea crear el nuevo producto en la ubicacion actual?** - Define si el proyecto se instala en la carpeta actual o si se crea una nueva con un nombre especifico.
+- **Que nombre desea agregar a la base de datos?** (CA-005) - Permite personalizar el nombre de la DB (por defecto es `academico_db`).
+- **¿Desea mostrar el detalle de los errores en un lenguaje no técnico?** (CA-008) - Habilita mensajes de error mas amigables para el usuario, ocultando detalles tecnicos al cliente.
+- **¿Desea habilitar el modulo de Registro de Auditoria?** (CA-009) - Instala el sistema de trazabilidad para registrar quien hizo que y cuando.
+- **Desea incluir estilos y tipografia tipo institucional?** (CA-004) - Aplica un tema visual corporativo (fuentes serif) en lugar del diseno estandar.
+- **Desea habilitar soporte para modo oscuro?** (CA-004) - Agrega el interruptor y los estilos necesarios para el Dark Mode en el frontend.
+- **Desea incluir el modulo de registro publico de usuarios?** (CA-002) - Habilita la opcion de "Crear cuenta" en el login para usuarios externos.
+- **Desea incluir la funcionalidad de recuperar contrasena?** (CA-002) - Integra los flujos para cuando un usuario olvida su contrasena.
+- **Desea habilitar reglas de validacion estricta?** (CA-007) - Fuerza contrasenas complejas y validaciones mas rigurosas en los formularios.
+- **Desea incluir el rol Docente?** (CA-003) - Instala o ignora todo el manejo de este rol dentro del control de acceso (RBAC).
+- **Desea incluir el modulo Estudiantes / Docentes / Cursos / Inscripciones?** - Activa u omite estos submodulos funcionales completos en el backend y frontend.
+- **Desea incluir plantillas DevOps?** (CA-011) - Genera los archivos necesarios de infraestructura (Docker, Docker Compose, CI/CD).
+
+Todas tus respuestas se guardan en el archivo `sga_config.json`. Si vuelves a correr el script, detectara tu configuracion y solo te preguntara si deseas agregar las funcionalidades que omitiste previamente.
+
+### Listar los Core Assets Implementados
+
+Para ver un resumen en formato lista indicando especificamente que *Core Assets* se implementaron (ej. "CA01: Implementado") basado en tus respuestas, copia y pega este bloque en tu consola de PowerShell (en la raiz del proyecto):
+
+```powershell
+$c = Get-Content sga_config.json -Raw | ConvertFrom-Json;
+$fmt = { param($v) if ($v) { "Implementado" } else { "No implementado" } };
+Write-Host "--- ESTADO DE CORE ASSETS ---" -ForegroundColor Cyan;
+Write-Host "CA01 (Autenticacion): Implementado (Base del sistema)";
+Write-Host "CA02 (Usuarios - Registro): $(& $fmt $c.IncludeRegistroUsuario)";
+Write-Host "CA03 (Roles - Docente): $(& $fmt $c.IncludeRolDocente)";
+Write-Host "CA04 (Diseno - Modo Oscuro): $(& $fmt $c.IncludeModoOscuro)";
+Write-Host "CA05 (Base de Datos): Implementado (DB: $($c.DbName))";
+Write-Host "CA06 (GraphQL): Implementado (Base del sistema)";
+Write-Host "CA07 (Validaciones Estrictas): $(& $fmt $c.IncludeValidacionEstricta)";
+Write-Host "CA08 (Manejo de Errores): $(& $fmt $c.NonTechnicalErrors)";
+Write-Host "CA09 (Registro de Auditoria): $(& $fmt $c.EnableAuditLog)";
+Write-Host "CA10 (Configuracion Entorno): Implementado (Base del sistema)";
+Write-Host "CA11 (DevOps Templates): $(& $fmt $c.IncludeDevOpsTemplates)";
 ```
-Desea incluir el rol Administrador? (s/n)
-Desea incluir el rol Docente? (s/n)
-```
-
-Responder `s` o `n` y presionar Enter. Si no estas seguro, responde `s` a ambas (es lo recomendado; el resto del sistema asume que existen ambos roles).
+Este comando lee directamente la configuracion guardada y te dara el listado exacto del estado de cada Core Asset.
 
 ## 4. Que genera el script
 

@@ -34,13 +34,6 @@ Write-Host ""
 
 $useCurrentDir = Ask-YesNo "  Desea crear el nuevo producto en la ubicacion actual? (s/n)"
 $global:ForceOverwrite = $true
-$global:DbName = Read-Host "  Que nombre desea agregar a la base de datos? (Deje en blanco para 'academico_db')"
-if ([string]::IsNullOrWhiteSpace($global:DbName)) {
-  $global:DbName = "academico_db"
-}
-
-$global:NonTechnicalErrors = Ask-YesNo "  ¿Desea mostrar el detalle de los errores en un lenguaje no técnico? (s/n)"
-$global:EnableAuditLog = Ask-YesNo "  ¿Desea habilitar el modulo de Registro de Auditoria? (s/n)"
 
 
 if ($useCurrentDir) {
@@ -61,6 +54,85 @@ else {
     Write-Host "  [!] El directorio ya existe: $PROJECT_ROOT. Se instalara sobre este." -ForegroundColor Yellow
   }
 }
+
+$configPath = Join-Path $PROJECT_ROOT "sga_config.json"
+if (Test-Path $configPath) {
+    Write-Host "  [i] Se encontro configuracion previa (sga_config.json)." -ForegroundColor Cyan
+    $existingConfig = Get-Content $configPath -Raw | ConvertFrom-Json
+    
+    $global:DbName = $existingConfig.DbName
+    $global:NonTechnicalErrors = $existingConfig.NonTechnicalErrors
+    $global:EnableAuditLog = $existingConfig.EnableAuditLog
+    $global:IncludeEstiloInstitucional = $existingConfig.IncludeEstiloInstitucional
+    $global:IncludeModoOscuro = $existingConfig.IncludeModoOscuro
+    $global:JwtExpire60 = $existingConfig.JwtExpire60
+    $global:IncludeRegistroUsuario = $existingConfig.IncludeRegistroUsuario
+    $global:IncludeRecuperarPassword = $existingConfig.IncludeRecuperarPassword
+    $global:IncludeValidacionEstricta = $existingConfig.IncludeValidacionEstricta
+    $global:IncludeRolDocente = $existingConfig.IncludeRolDocente
+    $global:IncludeEstudiantes = $existingConfig.IncludeEstudiantes
+    $global:IncludeDocentes = $existingConfig.IncludeDocentes
+    $global:IncludeCursos = $existingConfig.IncludeCursos
+    $global:IncludeInscripciones = $existingConfig.IncludeInscripciones
+    $global:IncludeDevOpsTemplates = $existingConfig.IncludeDevOpsTemplates
+
+    $addMore = Ask-YesNo "  Desea agregar las funcionalidades que NO integro anteriormente? (s/n)"
+    if ($addMore) {
+        if (-not $global:NonTechnicalErrors) { $global:NonTechnicalErrors = Ask-YesNo "  Desea mostrar el detalle de los errores en un lenguaje no tecnico? (s/n)" }
+        if (-not $global:EnableAuditLog) { $global:EnableAuditLog = Ask-YesNo "  Desea habilitar el modulo de Registro de Auditoria? (s/n)" }
+        if (-not $global:IncludeEstiloInstitucional) { $global:IncludeEstiloInstitucional = Ask-YesNo "  Desea incluir estilos y tipografia tipo institucional? (s/n)" }
+        if (-not $global:IncludeModoOscuro) { $global:IncludeModoOscuro = Ask-YesNo "  Desea habilitar soporte para modo oscuro? (s/n)" }
+        if (-not $global:JwtExpire60) { $global:JwtExpire60 = Ask-YesNo "  Desea configurar la duracion del token JWT para 60 minutos? (s/n)" }
+        if (-not $global:IncludeRegistroUsuario) { $global:IncludeRegistroUsuario = Ask-YesNo "  Para Login, desea incluir la opcion registrar usuario? (s/n)" }
+        if (-not $global:IncludeRecuperarPassword) { $global:IncludeRecuperarPassword = Ask-YesNo "  Desea incluir la opcion recuperacion de contrasena? (s/n)" }
+        if (-not $global:IncludeValidacionEstricta) { $global:IncludeValidacionEstricta = Ask-YesNo "  Desea incluir validacion estricta en la creacion de contrasena? (s/n)" }
+        if (-not $global:IncludeRolDocente) { $global:IncludeRolDocente = Ask-YesNo "  Desea agregar el usuario docente con rol (datos de prueba)? (s/n)" }
+        if (-not $global:IncludeEstudiantes) { $global:IncludeEstudiantes = Ask-YesNo "  Desea incluir el modulo Estudiantes? (s/n)" }
+        if (-not $global:IncludeDocentes) { $global:IncludeDocentes = Ask-YesNo "  Desea incluir el modulo Docentes? (s/n)" }
+        if (-not $global:IncludeCursos) { $global:IncludeCursos = Ask-YesNo "  Desea incluir el modulo Cursos? (s/n)" }
+        if (-not $global:IncludeInscripciones) { $global:IncludeInscripciones = Ask-YesNo "  Desea incluir el modulo Inscripciones? (s/n)" }
+        if (-not $global:IncludeDevOpsTemplates) { $global:IncludeDevOpsTemplates = Ask-YesNo "  Desea incluir el Core Asset 11 - DevOps Templates? (s/n)" }
+    }
+}
+else {
+    $global:DbName = Read-Host "  Que nombre desea agregar a la base de datos? (Deje en blanco para 'academico_db')"
+    if ([string]::IsNullOrWhiteSpace($global:DbName)) {
+      $global:DbName = "academico_db"
+    }
+    $global:NonTechnicalErrors = Ask-YesNo "  ¿Desea mostrar el detalle de los errores en un lenguaje no técnico? (s/n)"
+    $global:EnableAuditLog = Ask-YesNo "  ¿Desea habilitar el modulo de Registro de Auditoria? (s/n)"
+    $global:IncludeEstiloInstitucional = Ask-YesNo "  Desea incluir estilos y tipografia tipo institucional? (s/n)"
+    $global:IncludeModoOscuro = Ask-YesNo "  Desea habilitar soporte para modo oscuro? (s/n)"
+    $global:JwtExpire60 = Ask-YesNo "  Desea configurar la duracion del token JWT para 60 minutos? (s/n)"
+    $global:IncludeRegistroUsuario = Ask-YesNo "  Para Login, desea incluir la opcion registrar usuario? (s/n)"
+    $global:IncludeRecuperarPassword = Ask-YesNo "  Desea incluir la opcion recuperacion de contrasena? (s/n)"
+    $global:IncludeValidacionEstricta = Ask-YesNo "  Desea incluir validacion estricta en la creacion de contrasena? (s/n)"
+    $global:IncludeRolDocente = Ask-YesNo "  Desea agregar el usuario docente con rol (datos de prueba)? (s/n)"
+    $global:IncludeEstudiantes = Ask-YesNo "  Desea incluir el modulo Estudiantes? (s/n)"
+    $global:IncludeDocentes = Ask-YesNo "  Desea incluir el modulo Docentes? (s/n)"
+    $global:IncludeCursos = Ask-YesNo "  Desea incluir el modulo Cursos? (s/n)"
+    $global:IncludeInscripciones = Ask-YesNo "  Desea incluir el modulo Inscripciones? (s/n)"
+    $global:IncludeDevOpsTemplates = Ask-YesNo "  Desea incluir el Core Asset 11 - DevOps Templates? (s/n)"
+}
+
+$configData = @{
+    DbName = $global:DbName
+    NonTechnicalErrors = $global:NonTechnicalErrors
+    EnableAuditLog = $global:EnableAuditLog
+    IncludeEstiloInstitucional = $global:IncludeEstiloInstitucional
+    IncludeModoOscuro = $global:IncludeModoOscuro
+    JwtExpire60 = $global:JwtExpire60
+    IncludeRegistroUsuario = $global:IncludeRegistroUsuario
+    IncludeRecuperarPassword = $global:IncludeRecuperarPassword
+    IncludeValidacionEstricta = $global:IncludeValidacionEstricta
+    IncludeRolDocente = $global:IncludeRolDocente
+    IncludeEstudiantes = $global:IncludeEstudiantes
+    IncludeDocentes = $global:IncludeDocentes
+    IncludeCursos = $global:IncludeCursos
+    IncludeInscripciones = $global:IncludeInscripciones
+    IncludeDevOpsTemplates = $global:IncludeDevOpsTemplates
+}
+$configData | ConvertTo-Json | Set-Content $configPath -Encoding UTF8
 
 Write-Host ""
 
@@ -113,8 +185,7 @@ Write-Host "  [OK] Dependencias de BD instaladas y .env creado en backend/" -For
 
 Write-Host "===== CA-004: Sistema de Diseno =====" -ForegroundColor Cyan
 
-$global:IncludeEstiloInstitucional = Ask-YesNo "  Desea incluir estilos y tipografia tipo institucional? (s/n)"
-$global:IncludeModoOscuro = Ask-YesNo "  Desea habilitar soporte para modo oscuro? (s/n)"
+
 
 # Scaffolding del frontend con Vite + React (template de JavaScript).
 # Se usa Vite en lugar de Create React App por su velocidad de arranque,
@@ -182,10 +253,7 @@ pip install --quiet fastapi "uvicorn[standard]" "python-jose[cryptography]" pass
 Write-Host ""
 Write-Host "--- Configuracion adicional de CA-001 ---" -ForegroundColor Cyan
 
-$global:JwtExpire60 = Ask-YesNo "  Desea configurar la duracion del token JWT para 60 minutos? (s/n)"
-$global:IncludeRegistroUsuario = Ask-YesNo "  Para Login, desea incluir la opcion registrar usuario? (s/n)"
-$global:IncludeRecuperarPassword = Ask-YesNo "  Desea incluir la opcion recuperacion de contrasena? (s/n)"
-$global:IncludeValidacionEstricta = Ask-YesNo "  Desea incluir validacion estricta en la creacion de contrasena? (s/n)"
+
 
 if ($global:JwtExpire60) {
   $global:JwtExpireMinutes = 60
@@ -253,7 +321,7 @@ Add-Content -Path $envFilePath -Value "ROLE_ADMIN=administrador" -Encoding UTF8
 Write-Host "  [OK] Rol 'administrador' agregado al producto por defecto" -ForegroundColor Green
 
 # --- Rol: Docente ---
-$global:IncludeRolDocente = Ask-YesNo "  Desea agregar el usuario docente con rol (datos de prueba)? (s/n)"
+
 if ($global:IncludeRolDocente) {
   Add-Content -Path $envFilePath -Value "ROLE_DOCENTE=docente" -Encoding UTF8
   Write-Host "  [OK] Rol 'docente' agregado al producto" -ForegroundColor Green
@@ -279,10 +347,7 @@ Write-Host "  Configurador de modulos del producto."
 Write-Host "  Seleccione que modulos funcionales incluir."
 Write-Host "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
 
-$global:IncludeEstudiantes = Ask-YesNo "  Desea incluir el modulo Estudiantes? (s/n)"
-$global:IncludeDocentes = Ask-YesNo "  Desea incluir el modulo Docentes? (s/n)"
-$global:IncludeCursos = Ask-YesNo "  Desea incluir el modulo Cursos? (s/n)"
-$global:IncludeInscripciones = Ask-YesNo "  Desea incluir el modulo Inscripciones? (s/n)"
+
 
 pip install --quiet email-validator
 Write-Host "  [OK] Dependencias de gestion de usuarios instaladas" -ForegroundColor Green
@@ -389,7 +454,7 @@ function Install-CA011Dependencies {
   Write-Host "  [OK] ESLint instalado y script 'lint' anadido al frontend" -ForegroundColor Green
 }
 
-$global:IncludeDevOpsTemplates = Ask-YesNo "  Desea incluir el Core Asset 11 - DevOps Templates? (s/n)"
+
 
 if ($global:IncludeDevOpsTemplates) {
   Install-CA011Dependencies
@@ -688,7 +753,7 @@ class Curso(Base):
 $([string]::Empty)
 "@
     if ($global:IncludeDocentes) {
-      $content_models += "    docente_id = Column(Integer, ForeignKey(`"docentes.id`"), nullable=False)`n"
+      $content_models += "    docente_id = Column(Integer, ForeignKey(`"docentes.id`"), nullable=True)`n"
       $content_models += "    docente = relationship(`"Docente`", back_populates=`"cursos`")`n"
     }
     else {
@@ -710,14 +775,14 @@ class Inscripcion(Base):
 $([string]::Empty)
 "@
     if ($global:IncludeEstudiantes) {
-      $content_models += "    estudiante_id = Column(Integer, ForeignKey(`"estudiantes.id`"), nullable=False)`n"
+      $content_models += "    estudiante_id = Column(Integer, ForeignKey(`"estudiantes.id`"), nullable=True)`n"
       $content_models += "    estudiante = relationship(`"Estudiante`", back_populates=`"inscripciones`")`n"
     }
     else {
       $content_models += "    estudiante_id = Column(Integer, nullable=True) # Sin fk porque no hay estudiantes`n"
     }
     if ($global:IncludeCursos) {
-      $content_models += "    curso_id = Column(Integer, ForeignKey(`"cursos.id`"), nullable=False)`n"
+      $content_models += "    curso_id = Column(Integer, ForeignKey(`"cursos.id`"), nullable=True)`n"
       $content_models += "    curso = relationship(`"Curso`", back_populates=`"inscripciones`")`n"
     }
     else {
@@ -725,7 +790,7 @@ $([string]::Empty)
     }
   }
 
-  Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca005_db\models.py") -Content $content_models
+  Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca005_db\models.py") -Content $content_models -Force
 
   # CA-001 - Auth
   Write-Host ""
@@ -769,8 +834,11 @@ from typing import Optional
 from dotenv import load_dotenv
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, Depends
+from fastapi.security import OAuth2PasswordBearer
 from .schemas import TokenPayload
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 load_dotenv()
 
@@ -793,7 +861,7 @@ def create_access_token(data: dict, rol: str, expires_delta: Optional[timedelta]
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def verify_token(token: str) -> TokenPayload:
+def verify_token(token: str = Depends(oauth2_scheme)) -> TokenPayload:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         correo: str = payload.get("sub")
@@ -1210,12 +1278,7 @@ class CursoType:
     vigente: bool
 $([string]::Empty)
 "@
-  if ($global:IncludeDocentes) {
-    $content_gql_types += "    docente_id: int`n"
-  }
-  else {
-    $content_gql_types += "    docente_id: Optional[int] = None`n"
-  }
+  $content_gql_types += "    docente_id: Optional[int] = None`n"
         
   $content_gql_types += @"
 @strawberry.input
@@ -1226,12 +1289,7 @@ class CursoInput:
     vigente: bool = True
 $([string]::Empty)
 "@
-  if ($global:IncludeDocentes) {
-    $content_gql_types += "    docente_id: int`n"
-  }
-  else {
-    $content_gql_types += "    docente_id: Optional[int] = None`n"
-  }
+  $content_gql_types += "    docente_id: Optional[int] = None`n"
 }
 
 if ($global:IncludeInscripciones) {
@@ -1242,8 +1300,8 @@ class InscripcionType:
     estado: str
 $([string]::Empty)
 "@
-  if ($global:IncludeEstudiantes) { $content_gql_types += "    estudiante_id: int`n" } else { $content_gql_types += "    estudiante_id: Optional[int] = None`n" }
-  if ($global:IncludeCursos) { $content_gql_types += "    curso_id: int`n" } else { $content_gql_types += "    curso_id: Optional[int] = None`n" }
+  $content_gql_types += "    estudiante_id: Optional[int] = None`n"
+  $content_gql_types += "    curso_id: Optional[int] = None`n"
 
   $content_gql_types += @"
 @strawberry.input
@@ -1251,8 +1309,8 @@ class InscripcionInput:
     estado: str = `"activa`"
 $([string]::Empty)
 "@
-  if ($global:IncludeEstudiantes) { $content_gql_types += "    estudiante_id: int`n" } else { $content_gql_types += "    estudiante_id: Optional[int] = None`n" }
-  if ($global:IncludeCursos) { $content_gql_types += "    curso_id: int`n" } else { $content_gql_types += "    curso_id: Optional[int] = None`n" }
+  $content_gql_types += "    estudiante_id: Optional[int] = None`n"
+  $content_gql_types += "    curso_id: Optional[int] = None`n"
 }
 
 if ($global:IncludeRecuperarPassword) {
@@ -1268,7 +1326,7 @@ $([string]::Empty)
 "@
 }
 
-Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\types.py") -Content $content_gql_types
+Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\types.py") -Content $content_gql_types -Force
 
 $content_gql_schema = @"
 import strawberry
@@ -1670,7 +1728,12 @@ if ($global:IncludeValidacionEstricta) {
   $content_gql_schema = $content_gql_schema.Replace('if len(contrasena) < 8 or not any(c.isupper() for c in contrasena) or not any(c.islower() for c in contrasena) or not any(c.isdigit() for c in contrasena):', $strictGqlContrasena).Replace('if len(nueva_contrasena) < 8 or not any(c.isupper() for c in nueva_contrasena) or not any(c.islower() for c in nueva_contrasena) or not any(c.isdigit() for c in nueva_contrasena):', $strictGqlNueva).Replace($msgBase, $msgStrict)
 }
 
-Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\schema.py") -Content $content_gql_schema
+if (-not $global:EnableAuditLog) {
+  $content_gql_schema = $content_gql_schema -replace '(?m)^from core\.ca009_auditoria\.services import registrar_auditoria\r?\n', ''
+  $content_gql_schema = $content_gql_schema -replace '(?m)^\s*registrar_auditoria\(.*\)\r?\n', ''
+}
+
+Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "core\ca006_graphql\schema.py") -Content $content_gql_schema -Force
 
 # CA-007 - Validaciones Comunes
 Write-Host ""
@@ -2575,7 +2638,13 @@ graphql_app = SafeGraphQLRouter(schema, context_getter=get_context)
   )
 }
 
-Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "main.py") -Content $content_main
+if (-not $global:EnableAuditLog) {
+  $content_main = $content_main -replace '(?m)^from core\.ca009_auditoria\.router import router as auditoria_router\r?\n', ''
+  $content_main = $content_main -replace '(?m)^\s*from core\.ca009_auditoria\.models import AuditLog\r?\n', ''
+  $content_main = $content_main -replace '(?m)^\s*app\.include_router\(auditoria_router\)\r?\n', ''
+}
+
+Write-SkeletonFile -FilePath (Join-Path $BACKEND_DIR "main.py") -Content $content_main -Force
 
 $content_env_example = @'
 DB_HOST=localhost
@@ -2807,7 +2876,7 @@ export const DELETE_INSCRIPCION = gql`
 '@
 }
 
-Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\graphql\operations.js") -Content $content_fe_ops
+Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\graphql\operations.js") -Content $content_fe_ops -Force
 
 $content_fe_theme = @'
 import { createTheme } from "@mui/material/styles";
@@ -3542,7 +3611,7 @@ if ($global:IncludeModoOscuro) {
   $content_fe_layout = $content_fe_layout.Replace('<Button', "$toggleButton`n          <Button")
 }
 
-Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\Layout.jsx") -Content $content_fe_layout
+Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\design-system\components\Layout.jsx") -Content $content_fe_layout -Force
 
 $content_fe_estudiantes = @'
 import { useState } from "react";
@@ -3916,7 +3985,7 @@ $content_fe_app += @"
   );
 }
 "@
-Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\App.jsx") -Content $content_fe_app
+Write-SkeletonFile -FilePath (Join-Path $FRONTEND_DIR "src\App.jsx") -Content $content_fe_app -Force
 
 if ($global:EnableAuditLog) {
   $content_fe_auditoria = @'
